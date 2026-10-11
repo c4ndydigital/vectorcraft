@@ -8,7 +8,13 @@ FROM rust:bookworm AS builder
 # Set build environment variables
 ENV CARGO_TERM_COLOR=always
 
-# Install WebAssembly target
+# Install WebAssembly tools, binaryen (wasm-opt) and brotli
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      binaryen \
+      brotli \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN rustup target add wasm32-unknown-unknown
 
 # Install Trunk binary (pinned stable v0.21.14 with architecture detection)
@@ -32,8 +38,11 @@ COPY apps/ apps/
 COPY xtask/ xtask/
 COPY assets/ assets/
 
-# Build production WebAssembly client bundle into dist/web
-RUN cd apps/vectorcraft-web && trunk build --release
+# Build production WebAssembly client bundle into dist/web and precompress
+RUN cd apps/vectorcraft-web && trunk build --release --minify
+RUN cd dist/web && \
+    gzip -k -9 *.wasm *.js *.html *.css && \
+    brotli -k -q 11 *.wasm *.js *.html *.css
 
 # Build production backend server binary
 RUN cargo build --release --bin vectorcraft-server

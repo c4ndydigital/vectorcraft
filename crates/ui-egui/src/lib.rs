@@ -400,6 +400,8 @@ pub struct VectorcraftApp {
     pub collab_last_synced_rev: u64,
     /// Last cursor point broadcast to remote peers.
     pub last_broadcast_cursor: Option<vectorcraft_geom::Point>,
+    /// Last nickname broadcast to remote peers.
+    pub last_broadcast_name: String,
     /// Last timestamp (app time seconds) at which cursor presence was broadcast.
     pub last_cursor_broadcast_at: f64,
     /// Custom peer nickname chosen by user in the UI.
@@ -484,10 +486,11 @@ impl VectorcraftApp {
             collab_client_id,
             collab_last_synced_rev: 0,
             last_broadcast_cursor: None,
+            last_broadcast_name: format!("User {}", collab_client_id % 1000),
             last_cursor_broadcast_at: 0.0,
             collab_custom_name: String::new(),
             collab_share_copied_until: 0.0,
-            collab_share_url: "http://192.168.10.19:8767/?room=c4ndy-studio".to_string(),
+            collab_share_url: "/?room=c4ndy-studio".to_string(),
             collab_room_id: "c4ndy-studio".to_string(),
         }
     }
@@ -790,8 +793,10 @@ impl VectorcraftApp {
                         }
                     }
                 }
-                CollabIncoming::Presence(p) => {
+                CollabIncoming::Presence(mut p) => {
                     if p.client_id != self.collab_client_id {
+                        // Stamp arrival time using receiver's local monotonic clock to eliminate cross-host clock skew.
+                        p.last_seen = now;
                         let mut cursors = self.remote_cursors.lock().unwrap_or_else(|e| e.into_inner());
                         cursors.insert(p.client_id, p);
                         ctx.request_repaint();
@@ -801,9 +806,13 @@ impl VectorcraftApp {
         }
 
         // Prune stale cursors (older than 10 seconds)
-        {
+        let has_remote_cursors = {
             let mut cursors = self.remote_cursors.lock().unwrap_or_else(|e| e.into_inner());
             cursors.retain(|_, p| now - p.last_seen < 10.0);
+            !cursors.is_empty()
+        };
+        if has_remote_cursors {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
 
         // Check outgoing local document changes
@@ -828,22 +837,25 @@ impl VectorcraftApp {
             }
         }
 
-        // Check outgoing cursor updates
+        // Check outgoing cursor and presence updates
+        let current_name = self.collab_peer_name();
+        let name_changed = current_name != self.last_broadcast_name;
         let cursor_changed = self.hover_doc != self.last_broadcast_cursor;
         let dt = now - self.last_cursor_broadcast_at;
-        if (cursor_changed && dt >= 0.033) || dt >= 1.0 {
-            if cursor_changed || self.hover_doc.is_some() {
+        if name_changed || (cursor_changed && dt >= 0.033) || (self.hover_doc.is_some() && dt >= 1.0) {
+            if name_changed || cursor_changed || self.hover_doc.is_some() {
                 if let Some(outbox) = &self.services.collab_outbox {
                     let presence = PeerPresence {
                         client_id: self.collab_client_id,
-                        name: self.collab_peer_name(),
+                        name: current_name.clone(),
                         color: self.collab_peer_color(),
-                        cursor: self.hover_doc,
+                        cursor: self.hover_doc.map(|pt| vectorcraft_geom::Point::new((pt.x * 10.0).round() / 10.0, (pt.y * 10.0).round() / 10.0)),
                         last_seen: now,
                     };
                     let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
                     g.push(CollabOutgoing::Presence(presence));
                     self.last_broadcast_cursor = self.hover_doc;
+                    self.last_broadcast_name = current_name;
                     self.last_cursor_broadcast_at = now;
                 }
             }

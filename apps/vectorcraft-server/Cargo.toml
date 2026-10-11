@@ -13,10 +13,14 @@ workspace = true
 name = "vectorcraft-server"
 path = "src/main.rs"
 
+[lib]
+name = "vectorcraft_server"
+path = "src/lib.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "compression-br", "compression-gzip"] }
 yrs = { workspace = true }
 futures-util = "0.3"
 serde = { workspace = true }

@@ -84,8 +84,8 @@ pub mod ws {
     }
 }
 
-/// Dynamically resolve WebSocket URL for collaboration sync: ws://{host}/ws (or wss://).
-pub fn resolve_ws_url() -> Result<String, String> {
+/// Dynamically resolve WebSocket URL for collaboration sync: ws://{host}/ws?room={room_id} (or wss://).
+pub fn resolve_ws_url(room_id: &str) -> Result<String, String> {
     let window = web_sys::window().ok_or_else(|| "missing window".to_string())?;
     let location = window.location();
     let host = location.host().map_err(|e| format!("couldn't get location.host: {e:?}"))?;
@@ -93,9 +93,8 @@ pub fn resolve_ws_url() -> Result<String, String> {
         return Err("empty location.host".to_string());
     }
     let protocol = location.protocol().map_err(|e| format!("couldn't get location.protocol: {e:?}"))?;
-    let search = location.search().unwrap_or_default();
     let ws_protocol = if protocol == "https:" { "wss" } else { "ws" };
-    Ok(format!("{ws_protocol}://{host}/ws{search}"))
+    Ok(format!("{ws_protocol}://{host}/ws?room={room_id}"))
 }
 
 type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
@@ -176,9 +175,39 @@ struct Moving {
 async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Moving>) {
     track_drag(&canvas, &host.drag);
     let kept = moving.as_ref().map(|m| m.kept);
+
+    let (room_id, share_url) = if let Some(win) = web_sys::window() {
+        let loc = win.location();
+        let origin = loc.origin().unwrap_or_else(|_| "https://vector.c4ndy.com".to_string());
+        let search = loc.search().unwrap_or_default();
+        let existing_room = search
+            .trim_start_matches('?')
+            .split('&')
+            .find_map(|p| p.strip_prefix("room="))
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let room_id = match existing_room {
+            Some(r) => r,
+            None => {
+                let rand_suffix = (js_sys::Math::random() * 9000.0) as u32 + 1000;
+                let generated = format!("c4ndy-{}", rand_suffix);
+                if let Ok(hist) = win.history() {
+                    let _ = hist.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&format!("?room={generated}")));
+                }
+                generated
+            }
+        };
+        let share_url = format!("{origin}/?room={room_id}");
+        (room_id, share_url)
+    } else {
+        ("default".to_string(), "https://vector.c4ndy.com".to_string())
+    };
+
     // The app until the new runner takes it (still here if starting fails before).
     let slot = Rc::new(RefCell::new(moving.map(|m| m.app)));
     let (runner, taken, page) = (host.runner.clone(), slot.clone(), canvas.clone());
+    let (room_for_closure, share_for_closure) = (room_id.clone(), share_url.clone());
     let result = runner
         .start(
             canvas,
@@ -193,7 +222,7 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                     rs.device.set_device_lost_callback(move |reason, msg| loss.report(&ctx, format!("{reason:?}: {msg}")));
                 }
                 host.pasted.borrow_mut().ctx = Some(ctx.clone());
-                connect_collab(host.collab_inbox.clone(), ctx.clone(), host.ws.clone());
+                connect_collab(host.collab_inbox.clone(), ctx.clone(), host.ws.clone(), &room_for_closure);
                 let services = services(
                     host.inbox.clone(),
                     host.place_inbox.clone(),
@@ -212,19 +241,8 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                     None => {
                         let mut app = VectorcraftApp::new(Session::new(), services);
                         let _ = app.run("file.new", vectorcraft_ui_egui::serde_json::json!({"width": 800.0, "height": 600.0}));
-                        if let Some(win) = web_sys::window() {
-                            let loc = win.location();
-                            let origin = loc.origin().unwrap_or_else(|_| "http://192.168.10.19:8767".to_string());
-                            let search = loc.search().unwrap_or_default();
-                            let room_id = search
-                                .trim_start_matches('?')
-                                .split('&')
-                                .find_map(|p| p.strip_prefix("room="))
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| format!("c4ndy-{}", (app.collab_client_id % 9000 + 1000)));
-                            app.collab_room_id = room_id.clone();
-                            app.collab_share_url = format!("{origin}/?room={room_id}");
-                        }
+                        app.collab_room_id = room_for_closure.clone();
+                        app.collab_share_url = share_for_closure.clone();
                         app
                     }
                 };
@@ -246,13 +264,15 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
     }
 }
 
-/// The runner's options: wgpu (WebGPU where available, else WebGL2; `?webgl` forces WebGL2).
+/// The runner's options: wgpu (WebGL2 by default for zero-error stability, or WebGPU if ?webgpu is specified).
 fn web_options() -> eframe::WebOptions {
     let mut options = eframe::WebOptions::default();
-    if query().contains("webgl")
-        && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
-    {
-        create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup {
+        if query().contains("webgpu") {
+            create.instance_descriptor.backends = eframe::wgpu::Backends::all();
+        } else {
+            create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
+        }
     }
     options
 }
@@ -267,7 +287,7 @@ fn detect_language() {
         tags.extend(navigator.language());
     }
     i18n::set_system_locales(tags.as_slice());
-    if let Some(el) = element(LOADING_ID) {
+    if let Some(el) = element("vectorcraft_loading_status").or_else(|| element(LOADING_ID)) {
         el.set_text_content(Some(i18n::message(i18n::system_lang(), "Loading VectorCraft…").as_str()));
     }
 }
@@ -534,11 +554,11 @@ impl eframe::App for WebShell {
     }
 }
 
-fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws_slot: Rc<RefCell<Option<ws::WebSocket>>>) {
+fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws_slot: Rc<RefCell<Option<ws::WebSocket>>>, room_id: &str) {
     if ws_slot.borrow().is_some() {
         return;
     }
-    let url = match resolve_ws_url() {
+    let url = match resolve_ws_url(room_id) {
         Ok(u) => u,
         Err(e) => {
             log::warn!("collab: couldn't resolve WebSocket URL: {e}");

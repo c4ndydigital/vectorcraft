@@ -57,7 +57,6 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
             let gap = ui.spacing().item_spacing.x;
             let with_search = ws_w + 8.0 + gap + 200.0;
             let search_full = room >= with_search;
-            let discord = room >= with_search + 10.0 + gap + crate::community::discord_width(ui, false);
             let ws_w = if search_full { ws_w } else { ws_w.min(room - 8.0 - gap - 24.0).max(64.0) };
             let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)));
             let ui = &mut rui;
@@ -116,7 +115,9 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
             if sresp.clicked() {
                 app.copy_share_link(ui.ctx(), now);
             }
-            sresp.on_hover_text("Diesen Raum mit anderen teilen (Link kopieren)");
+            sresp.on_hover_text(
+                "Diesen Raum mit anderen teilen (Link kopieren)\n\nHinweis: Räume werden nach Verlassen aller Teilnehmer gelöscht. Bitte lokal speichern.",
+            );
 
             ui.add_space(6.0);
             let pcolor = app.collab_peer_color();
@@ -128,11 +129,6 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                 .hint_text("Dein Name")
                 .desired_width(75.0);
             ui.add(name_edit);
-
-            if discord {
-                ui.add_space(8.0);
-                crate::community::discord_button(app, ui, false);
-            }
         });
     });
     if custom {

@@ -64,10 +64,21 @@ fn about_tab(app: &mut VectorcraftApp, ui: &mut egui::Ui) {
     ui.add_space(12.0);
     ui.label(
         egui::RichText::new(tl!(
-            "Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft."
+            "Based on VectorCraft by the ArtCraft Team. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft."
         ))
         .size(11.0),
     );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let t = theme::Tokens::get(ui.ctx());
+        if ui.add(egui::Button::new(egui::RichText::new("Impressum").color(t.accent).size(11.0)).frame(false)).clicked() {
+            app.open_url("/impressum");
+        }
+        ui.label(egui::RichText::new("·").color(t.text_dim).size(11.0));
+        if ui.add(egui::Button::new(egui::RichText::new("Datenschutz").color(t.accent).size(11.0)).frame(false)).clicked() {
+            app.open_url("/datenschutz");
+        }
+    });
     // The GPU the window renders with, for bug reports (Preferences › Performance picks it).
     if let Some(adapter) = &app.graphics_adapter {
         ui.add_space(6.0);

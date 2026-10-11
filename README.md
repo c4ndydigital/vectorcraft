@@ -1,14 +1,4 @@
-<p align="center">
-  <a href="https://getartcraft.com/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/artcraft-logo-white.svg">
-      <img alt="ArtCraft" src="docs/brand/artcraft-logo.svg" width="200">
-    </picture>
-  </a>
-</p>
-
-
-<h1 align="center">VectorCraft</h1>
+# VectorCraft
 
 <p align="center">
   <b>Vector illustration; an open-source, clean-room reimplementation of Adobe Illustrator, rebuilt in pure Rust.</b>
@@ -16,7 +6,7 @@
 
 <p align="center">
   A fast, open-source, clean-room take on the Adobe Illustrator workflow. It runs natively on
-  macOS, Windows, Linux and FreeBSD, and in the browser via WebAssembly. Built by the ArtCraft team.
+  macOS, Windows, Linux and FreeBSD, and in the browser via WebAssembly.
 </p>
 
 <p align="center">
@@ -28,13 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/artcraft"><img alt="Join the ArtCraft community on Discord" src="https://img.shields.io/badge/Join%20us%20on%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" height="40"></a>
-</p>
-
-<p align="center">
-  <a href="https://getartcraft.com/apps/vectorcraft"><b>VectorCraft on getartcraft.com</b></a> ·
-  <a href="https://getartcraft.com/">ArtCraft</a> ·
-  <a href="https://getartcraft.com/apps">All Crafting Apps</a>
+  <a href="https://github.com/c4ndydigital/vectorcraft"><b>VectorCraft on GitHub</b></a>
 </p>
 
 <br>
@@ -284,29 +268,32 @@ And [**ArtCraft**](https://getartcraft.com/) itself, our AI image and video stud
 
 <br>
 
-<p align="center">
-  <a href="https://discord.gg/artcraft"><img alt="Join the ArtCraft community on Discord" src="https://img.shields.io/badge/Join%20us%20on%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" height="40"></a>
-</p>
+## Community & Contributing
 
-<h3 align="center">Come make things with us</h3>
+VectorCraft is developed openly on GitHub. Report issues, submit pull requests, or discuss feature ideas at:
+[https://github.com/c4ndydigital/vectorcraft](https://github.com/c4ndydigital/vectorcraft)
 
-<p align="center">
-  Our Discord is where artists of every kind hang out: people who paint, shoot, draw, cut film,
-  set type, and people still figuring out what they like to make. Share what you're working on,
-  ask for help, tell us what's broken, or tell us what you wish these tools could do.
-  Whatever your medium and however long you've been at it, you're welcome here.
-</p>
+## Deployment & Production Monitoring (Coolify)
 
-<p align="center">
-  <a href="https://discord.gg/artcraft"><b>discord.gg/artcraft</b></a> ·
-  <a href="https://getartcraft.com/">getartcraft.com</a> ·
-  <a href="https://getartcraft.com/apps">The Crafting Apps</a> ·
-  <a href="https://getartcraft.com/apps/vectorcraft">VectorCraft</a>
-</p>
+VectorCraft includes a multi-stage Dockerfile and native health checks ready for single-click deployment via [Coolify](https://coolify.io).
+
+### Resource Monitoring & Alerts (Coolify Native)
+For production deployments, configure native container monitoring directly in the Coolify dashboard:
+1. Navigate to **Server** &rarr; **Notifications** in the Coolify dashboard.
+2. Enable your preferred notification channel (Email, Webhook, Telegram, or Discord).
+3. Configure container alerts for unexpected restarts and high memory usage (e.g. 80%).
+
+### Environment Variables
+Configure runtime variables in your Coolify application settings (or copy `.env.example` to `.env`):
+- `PORT`: HTTP and WebSocket listening port (default: `8767`).
+- `LEGAL_*`: Operator details for `/impressum` and `/datenschutz` (HTML-escaped, German DDG/DSGVO compliant).
+- `UMAMI_*`: Optional self-hosted Umami analytics (`UMAMI_SCRIPT_URL` and `UMAMI_WEBSITE_ID`).
+- `METRICS_TOKEN`: Optional Bearer token protecting the `/metrics` and `/status` endpoints.
+- `ROOM_GRACE_SECONDS`, `MAX_ROOMS`: Ephemeral room retention limits.
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=storytold/vectorcraft&type=Date&legend=top-left)](https://www.star-history.com/?repos=storytold%2Fvectorcraft&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=c4ndydigital/vectorcraft&type=Date&legend=top-left)](https://www.star-history.com/?repos=c4ndydigital%2Fvectorcraft&type=date&legend=top-left)
 
 ## License and credits
 
@@ -329,6 +316,5 @@ Forks and modified versions must remove them.
 <sub>Adobe, Photoshop, Illustrator, Premiere Pro, Lightroom, Acrobat, After Effects and InDesign are trademarks or registered trademarks of Adobe Inc. in the United States and/or other countries. VectorCraft is an independent, open-source project and is not affiliated with, sponsored by or endorsed by Adobe Inc.; these names are used only to describe the workflows it is compatible with.</sub>
 
 <p align="center">
-  <a href="https://getartcraft.com/"><img alt="ArtCraft" src="docs/brand/artcraft-mark.svg" width="28"></a><br>
-  <sub>Made by the <a href="https://getartcraft.com/">ArtCraft</a> team and community.</sub>
+  <sub>Based on VectorCraft by the ArtCraft team.</sub>
 </p>

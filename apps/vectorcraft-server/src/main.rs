@@ -377,3 +377,58 @@ async fn main() -> ExitCode {
 
     ExitCode::SUCCESS
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_cli_args_flags() {
+        let args = vec![
+            "--bind".to_string(),
+            "127.0.0.1".to_string(),
+            "--port".to_string(),
+            "9050".to_string(),
+            "--dist".to_string(),
+            "/tmp/assets".to_string(),
+        ];
+        let cfg = parse_cli_args(&args).expect("valid args").expect("some config");
+        assert_eq!(cfg.bind, "127.0.0.1");
+        assert_eq!(cfg.port, 9050);
+        assert_eq!(cfg.dist, PathBuf::from("/tmp/assets"));
+    }
+
+    #[test]
+    fn test_parse_cli_args_equals_syntax() {
+        let args = vec![
+            "--bind=192.0.2.1".to_string(),
+            "--port=8080".to_string(),
+            "--dist=custom/dist".to_string(),
+        ];
+        let cfg = parse_cli_args(&args).expect("valid args").expect("some config");
+        assert_eq!(cfg.bind, "192.0.2.1");
+        assert_eq!(cfg.port, 8080);
+        assert_eq!(cfg.dist, PathBuf::from("custom/dist"));
+    }
+
+    #[test]
+    fn test_parse_cli_args_invalid_port_returns_error() {
+        let args = vec!["--port".to_string(), "not_a_number".to_string()];
+        let res = parse_cli_args(&args);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_parse_cli_args_help_returns_none() {
+        let args = vec!["--help".to_string()];
+        let res = parse_cli_args(&args).expect("parse ok");
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_parse_cli_args_version_returns_none() {
+        let args = vec!["--version".to_string()];
+        let res = parse_cli_args(&args).expect("parse ok");
+        assert!(res.is_none());
+    }
+}

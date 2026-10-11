@@ -309,6 +309,18 @@ pub fn build_app(state: AppState, dist_path: &Path) -> Router {
 
     Router::new()
         .route("/health", get(health_handler))
+        .route("/impressum", get(|| async {
+            let cfg = vectorcraft_server::LegalConfig::from_env();
+            axum::response::Html(vectorcraft_server::render_impressum(&cfg))
+        }))
+        .route("/datenschutz", get(|| async {
+            let cfg = vectorcraft_server::LegalConfig::from_env();
+            let umami = vectorcraft_server::UmamiConfig::from_env();
+            axum::response::Html(vectorcraft_server::render_datenschutz(&cfg, umami.as_ref()))
+        }))
+        .route("/status", get(|| async {
+            axum::Json(serde_json::json!({"status": "ok"}))
+        }))
         .route("/ws", get(ws_handler))
         .fallback_service(serve_dir)
         .layer(cors)

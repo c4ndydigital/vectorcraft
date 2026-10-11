@@ -2492,11 +2492,13 @@ pub fn menu_tree() -> Vec<(&'static str, Vec<Item>)> {
         (
             "Help",
             vec![
-                c("VectorCraft on getartcraft.com", "help.appPage"),
-                c("VectorCraft on GitHub", "help.github"),
+                c("Source code on GitHub", "help.github"),
                 Sep,
                 c("Search Commands…", "help.commandPalette"),
                 todos("VectorCraft Help…", "F1"),
+                Sep,
+                c("Impressum", "help.impressum"),
+                c("Datenschutz", "help.datenschutz"),
                 Sep,
                 c("About VectorCraft", "help.about"),
             ],

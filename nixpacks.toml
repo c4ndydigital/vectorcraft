@@ -14,10 +14,10 @@ DIST_DIR = "dist/web"
 nixPkgs = ["...", "curl", "pkg-config", "binaryen"]
 
 [phases.install]
-# Provision wasm32-unknown-unknown target and prebuilt trunk binary
+# Provision wasm32-unknown-unknown target and prebuilt trunk binary (pinned v0.21.14 with multi-arch detection)
 cmds = [
   "rustup target add wasm32-unknown-unknown || true",
-  "which trunk || (curl -sSfL https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf - -C /usr/local/bin)"
+  'which trunk || (ARCH="$(uname -m)"; case "$ARCH" in x86_64) T_ARCH="x86_64-unknown-linux-gnu" ;; aarch64|arm64) T_ARCH="aarch64-unknown-linux-gnu" ;; *) echo "Unsupported architecture: $ARCH" && exit 1 ;; esac && curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-${T_ARCH}.tar.gz" | tar -xzf - -C /usr/local/bin && chmod +x /usr/local/bin/trunk)'
 ]
 
 [phases.build]

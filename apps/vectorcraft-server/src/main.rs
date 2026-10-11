@@ -8,12 +8,13 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -57,7 +58,7 @@ impl Default for ServerConfig {
             .or_else(|_| std::env::var("DIST"))
             .or_else(|_| std::env::var("DIST_DIR"))
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("dist/web"));
+            .unwrap_or_else(|_| PathBuf::from("dist/web"));
         Self { bind, port, dist }
     }
 }
@@ -124,9 +125,9 @@ USAGE:
     vectorcraft-server [OPTIONS]
 
 OPTIONS:
-    --bind <ADDR>       Host address to bind (default: 0.0.0.0)
-    --port <PORT>       Port number to listen on (default: 8767)
-    --dist <PATH>       Path to static web assets directory (default: dist/web)
+    --bind <ADDR>       Host address to bind (env: BIND / BIND_ADDR / HOST, default: 0.0.0.0)
+    --port <PORT>       Port number to listen on (env: PORT, default: 8767)
+    --dist <PATH>       Path to static web assets directory (env: DIST_PATH / DIST / DIST_DIR, default: dist/web)
     -h, --help          Print this help message
     -V, --version       Print version information
 "
@@ -206,29 +207,51 @@ async fn handle_socket(socket: WebSocket, room: RoomState, room_id: String) {
         doc_guard.transact().encode_state_as_update_v1(&StateVector::default())
     };
 
-    if !snapshot_bytes.is_empty() {
-        if let Err(e) = ws_sender.send(Message::Binary(snapshot_bytes.into())).await {
-            eprintln!("[server] failed sending initial snapshot to client {client_id}: {e}");
-            return;
-        }
+    if !snapshot_bytes.is_empty()
+        && let Err(e) = ws_sender.send(Message::Binary(snapshot_bytes.into())).await
+    {
+        eprintln!("[server] failed sending initial snapshot to client {client_id}: {e}");
+        return;
     }
 
     // 2. Spawn task to forward broadcast messages from other peers to this client
+    //    and send 30s ping keep-alive frames to prevent Cloudflare/reverse proxy timeouts.
     let mut broadcast_rx = room.broadcast_tx.subscribe();
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = broadcast_rx.recv().await {
-            match msg {
-                PeerMessage::Binary { sender_id, data } if sender_id != client_id => {
-                    if ws_sender.send(Message::Binary(data)).await.is_err() {
+    let send_task = tokio::spawn(async move {
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Consume immediate first tick so ping is sent after 30s of connection
+        ping_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = ping_interval.tick() => {
+                    if ws_sender.send(Message::Ping(Bytes::new())).await.is_err() {
                         break;
                     }
                 }
-                PeerMessage::Text { sender_id, data } if sender_id != client_id => {
-                    if ws_sender.send(Message::Text(data.into())).await.is_err() {
-                        break;
+                recv_res = broadcast_rx.recv() => {
+                    match recv_res {
+                        Ok(PeerMessage::Binary { sender_id, data }) if sender_id != client_id => {
+                            if ws_sender.send(Message::Binary(data)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(PeerMessage::Text { sender_id, data }) if sender_id != client_id => {
+                            if ws_sender.send(Message::Text(data.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            eprintln!("[server] broadcast lagged by {skipped} messages for client {client_id}");
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
                     }
                 }
-                _ => {}
             }
         }
     });
@@ -248,7 +271,7 @@ async fn handle_socket(socket: WebSocket, room: RoomState, room_id: String) {
                 // Decode update and apply to room's yrs::Doc
                 match Update::decode_v1(&bytes) {
                     Ok(update) => {
-                        let mut doc_guard = match room.doc.lock() {
+                        let doc_guard = match room.doc.lock() {
                             Ok(g) => g,
                             Err(poisoned) => poisoned.into_inner(),
                         };
@@ -284,7 +307,12 @@ pub fn build_app(state: AppState, dist_path: &Path) -> Router {
 
     let serve_dir = ServeDir::new(dist_path).append_index_html_on_directories(true);
 
-    Router::new().route("/health", get(health_handler)).route("/ws", get(ws_handler)).fallback_service(serve_dir).layer(cors).with_state(state)
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/ws", get(ws_handler))
+        .fallback_service(serve_dir)
+        .layer(cors)
+        .with_state(state)
 }
 
 fn print_banner(bind: &str, port: u16, dist: &Path) {
@@ -292,7 +320,6 @@ fn print_banner(bind: &str, port: u16, dist: &Path) {
     println!("  VectorCraft Multiplayer Collaboration Server");
     println!("==================================================================");
     println!("  Local address:   http://{bind}:{port}");
-    println!("  LAN access:      http://192.168.10.19:{port}");
     println!("  WebSocket sync:  ws://{bind}:{port}/ws");
     println!("  Static dist:     {}", dist.display());
     println!("  Health check:    http://{bind}:{port}/health");
@@ -311,10 +338,13 @@ async fn main() -> ExitCode {
         }
     };
 
-    if !config.dist.exists() {
-        if let Err(e) = std::fs::create_dir_all(&config.dist) {
-            eprintln!("vectorcraft-server: warning: could not create dist dir `{}`: {e}", config.dist.display());
-        }
+    if !config.dist.exists()
+        && let Err(e) = std::fs::create_dir_all(&config.dist)
+    {
+        eprintln!(
+            "vectorcraft-server: warning: could not create dist dir `{}`: {e}",
+            config.dist.display()
+        );
     }
 
     let addr_str = format!("{}:{}", config.bind, config.port);

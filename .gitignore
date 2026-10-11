@@ -1,3 +1,4 @@
+# Existing ignore rules
 *~
 plan/
 /target
@@ -7,3 +8,33 @@ plan/
 .DS_Store
 # A craft-fonts checkout for CRAFT_FONTS_DIR (CI and release workflows check it out here)
 /craft-fonts
+
+# ==============================================================================
+# Security & Secret Isolation (CRITICAL)
+# ==============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+*.secret
+*.token
+*.credentials
+id_rsa*
+id_ed25519*
+
+# Teamwork & Agent workspaces
+.agents/
+
+# IDE & Editor artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Profiling and test dumps
+*.profraw
+*.profdata

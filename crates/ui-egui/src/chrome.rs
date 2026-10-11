@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use egui::{CornerRadius, Sense, Stroke, StrokeKind, Ui, vec2};
+use egui::{Color32, CornerRadius, Sense, Stroke, StrokeKind, Ui, vec2};
 use serde_json::json;
 use vectorcraft_doc::NodeKind;
 
@@ -95,8 +95,42 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                 app.ui.palette_open = true;
                 app.ui.palette_query.clear();
             }
+            ui.add_space(8.0);
+            let now = app.last_time;
+            let copied = now < app.collab_share_copied_until;
+            let share_text = if copied { "✓ Kopiert!" } else { "Teilen" };
+            let share_color = if copied {
+                Color32::from_rgb(10, 207, 131)
+            } else {
+                Color32::from_rgb(24, 160, 251)
+            };
+            let (sr, sresp) = ui.allocate_exact_size(vec2(74.0, 24.0), Sense::click());
+            ui.painter().rect_filled(sr, CornerRadius::same(12), share_color);
+            ui.painter().text(
+                sr.center(),
+                egui::Align2::CENTER_CENTER,
+                share_text,
+                egui::FontId::proportional(12.0),
+                Color32::WHITE,
+            );
+            if sresp.clicked() {
+                app.copy_share_link(ui.ctx(), now);
+            }
+            sresp.on_hover_text("Diesen Raum mit anderen teilen (Link kopieren)");
+
+            ui.add_space(6.0);
+            let pcolor = app.collab_peer_color();
+            let peer_c32 = Color32::from_rgba_unmultiplied(pcolor[0], pcolor[1], pcolor[2], pcolor[3]);
+            let (dot_r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+            ui.painter().circle_filled(dot_r.center(), 4.5, peer_c32);
+
+            let name_edit = egui::TextEdit::singleline(&mut app.collab_custom_name)
+                .hint_text("Dein Name")
+                .desired_width(75.0);
+            ui.add(name_edit);
+
             if discord {
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 crate::community::discord_button(app, ui, false);
             }
         });

@@ -371,6 +371,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     }
     ime_output(app, ui.ctx(), &xf);
     crate::place::paint_drop_highlight(app, ui.ctx(), &painter, rect);
+    paint_remote_cursors(app, &painter, &xf);
 
     if app.ui.view.rulers && app.ui.screen_mode < 3 {
         rulers(ui, full, &xf, app.hover_doc, app.session.general_unit(), &t);
@@ -466,7 +467,7 @@ fn handle_input(app: &mut VectorcraftApp, ui: &Ui, resp: &egui::Response, rect: 
     // so a tap whose press and lift come in one frame has no hover position: it presses (and
     // double-taps) where it was seen last (#491).
     let at = hover.or_else(|| pointer.interact_pos().filter(|p| rect.contains(*p)));
-    app.hover_doc = hover.map(|p| xf.to_doc(p));
+    app.hover_doc = at.map(|p| xf.to_doc(p));
     let view = app.view_info();
     let drag: Option<Drag> = ui.data(|d| d.get_temp(drag_id()));
     // A modifier pressed or released over the canvas re-hovers the tool, so what it changes shows
@@ -1163,6 +1164,56 @@ fn panel_drop(app: &mut VectorcraftApp, ui: &Ui, resp: &egui::Response, xf: &Xf)
     };
     if let Err(e) = app.run(cmd, params) {
         app.status(e);
+    }
+}
+
+pub(crate) fn paint_remote_cursors(app: &VectorcraftApp, painter: &egui::Painter, xf: &Xf) {
+    let cursors = match app.remote_cursors.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+
+    for (&client_id, peer) in &cursors {
+        if client_id == app.collab_client_id {
+            continue;
+        }
+        let Some(doc_pos) = peer.cursor else {
+            continue;
+        };
+
+        let screen_pos = xf.to_screen(doc_pos);
+        let pts = crate::cursors::arrow_points(screen_pos);
+        if pts.len() < 7 {
+            continue;
+        }
+
+        let peer_color = egui::Color32::from_rgba_unmultiplied(peer.color[0], peer.color[1], peer.color[2], peer.color[3]);
+
+        // Shadow halo
+        painter.add(egui::Shape::closed_line(
+            pts.iter().map(|p| *p + egui::vec2(1.0, 1.5)).collect(),
+            egui::Stroke::new(2.5, egui::Color32::from_black_alpha(80)),
+        ));
+
+        // Peer color fill (arrow is concave: two convex parts)
+        painter.add(egui::Shape::convex_polygon(vec![pts[0], pts[1], pts[2], pts[5], pts[6]], peer_color, egui::Stroke::NONE));
+        painter.add(egui::Shape::convex_polygon(vec![pts[2], pts[3], pts[4], pts[5]], peer_color, egui::Stroke::NONE));
+
+        // 1px white stroke
+        painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.0, egui::Color32::WHITE)));
+
+        // Rounded name badge pill offset by (12, 14) with peer name in white text
+        let badge_origin = screen_pos + egui::vec2(12.0, 14.0);
+        let galley = painter.layout(peer.name.clone(), egui::FontId::proportional(11.0), egui::Color32::WHITE, 200.0);
+        let padding = egui::vec2(6.0, 3.0);
+        let badge_rect = egui::Rect::from_min_size(badge_origin, galley.size() + padding * 2.0);
+
+        // Shadow halo behind badge pill
+        painter.rect_filled(badge_rect.translate(egui::vec2(0.5, 1.5)), egui::CornerRadius::same(4), egui::Color32::from_black_alpha(60));
+        // Badge pill background in peer color
+        painter.rect_filled(badge_rect, egui::CornerRadius::same(4), peer_color);
+        // White text inside badge pill
+        painter.galley(badge_origin + padding, galley, egui::Color32::WHITE);
     }
 }
 

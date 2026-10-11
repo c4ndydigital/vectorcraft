@@ -1,0 +1,126 @@
+//! Integration test for CRDT State Bridge and two-way shape synchronization.
+
+use serde_json::json;
+use vectorcraft_doc::NodeId;
+use vectorcraft_engine::collab::CollabBridge;
+use vectorcraft_testkit::fixtures::{select, session_with};
+use vectorcraft_testkit::invariants::check_session;
+
+#[test]
+fn test_crdt_rectangle_bidirectional_sync() {
+    // 1. Initialize two independent engine/document instances
+    let mut session_a = session_with(800.0, 600.0);
+    let mut session_b = session_with(800.0, 600.0);
+
+    let mut bridge_a = CollabBridge::with_client_id(101);
+    let mut bridge_b = CollabBridge::with_client_id(202);
+
+    // Initial session invariants hold
+    check_session(&session_a).expect("session_a initially sane");
+    check_session(&session_b).expect("session_b initially sane");
+
+    // 2. Create a basic shape (rectangle) in session_a
+    let rect_val = session_a
+        .execute(
+            "shape.rectangle",
+            &json!({
+                "x": 100.0,
+                "y": 150.0,
+                "width": 200.0,
+                "height": 120.0,
+            }),
+        )
+        .expect("create rectangle in session_a");
+
+    let rect_id = NodeId(rect_val["id"].as_u64().expect("valid rect id"));
+    check_session(&session_a).expect("session_a sane after rect creation");
+
+    let node_a_init = session_a.doc().expect("doc_a").doc.node(rect_id).expect("node in session_a").clone();
+
+    // 3. Sync CRDT update from session_a to session_b
+    let update_a_to_b = bridge_a.sync_from_session(&session_a).expect("sync_from_session on bridge_a");
+    assert!(!update_a_to_b.is_empty(), "update should contain bytes");
+
+    bridge_b.apply_remote_update(&mut session_b, &update_a_to_b).expect("apply_remote_update on bridge_b");
+
+    // 4. Assert session_b reflects the exact same rectangle:
+    //    ID, node kind, geometric bounds, appearance, doc invariants.
+    check_session(&session_b).expect("session_b invariants hold after applying remote update");
+
+    let node_b = session_b.doc().expect("doc_b").doc.node(rect_id).expect("node must exist in session_b");
+
+    assert_eq!(node_b.id, node_a_init.id, "Node IDs must match");
+    assert_eq!(node_b.kind, node_a_init.kind, "NodeKind must match");
+    assert_eq!(node_b.geometric_bounds(), node_a_init.geometric_bounds(), "Geometric bounds must match");
+    assert_eq!(node_b.appearance, node_a_init.appearance, "Appearance must match");
+
+    // 5. Modify the shape in session_b:
+    //    Select it, move it with object.move, and change its fill with paint.setFill
+    select(&mut session_b, &[rect_id]);
+
+    session_b.execute("object.move", &json!({ "dx": 50.0, "dy": 30.0 })).expect("object.move in session_b");
+
+    session_b.execute("paint.setFill", &json!({ "color": "#e03030" })).expect("paint.setFill in session_b");
+
+    check_session(&session_b).expect("session_b sane after edits");
+
+    let node_b_mod = session_b.doc().expect("doc_b").doc.node(rect_id).expect("node in session_b after mod").clone();
+
+    // 6. Sync CRDT update from session_b back to session_a
+    let update_b_to_a = bridge_b.sync_from_session(&session_b).expect("sync_from_session on bridge_b");
+    assert!(!update_b_to_a.is_empty(), "update must not be empty");
+
+    bridge_a.apply_remote_update(&mut session_a, &update_b_to_a).expect("apply_remote_update on bridge_a");
+
+    // 7. Assert bidirectional convergence
+    check_session(&session_a).expect("session_a sane after remote update");
+
+    let node_a_final = session_a.doc().expect("doc_a").doc.node(rect_id).expect("node in session_a after convergence");
+
+    assert_eq!(node_a_final.kind, node_b_mod.kind, "Node kinds converged");
+    assert_eq!(node_a_final.appearance, node_b_mod.appearance, "Appearance converged");
+    assert_eq!(node_a_final.geometric_bounds(), node_b_mod.geometric_bounds(), "Geometric bounds converged");
+    assert_eq!(
+        node_a_final.geometric_bounds(),
+        Some(vectorcraft_geom::Rect::new(150.0, 180.0, 350.0, 300.0)),
+        "Exact moved bounds match (100+50, 150+30, 300+50, 270+30)"
+    );
+
+    // 8. Test shape deletion propagation
+    session_a.execute("edit.clear", &json!({ "ids": [rect_id.0] })).expect("delete object in session_a");
+    assert!(session_a.doc().expect("doc_a").doc.node(rect_id).is_none(), "node removed in session_a");
+
+    let del_update = bridge_a.sync_from_session(&session_a).expect("sync deletion from session_a");
+
+    bridge_b.apply_remote_update(&mut session_b, &del_update).expect("apply deletion to session_b");
+
+    assert!(session_b.doc().expect("doc_b").doc.node(rect_id).is_none(), "node removed in session_b after sync");
+    check_session(&session_a).expect("session_a invariants hold after delete");
+    check_session(&session_b).expect("session_b invariants hold after delete");
+}
+
+#[test]
+fn test_crdt_export_update_snapshot() {
+    let mut session_a = session_with(600.0, 400.0);
+    let mut session_b = session_with(600.0, 400.0);
+
+    let mut bridge_a = CollabBridge::new();
+    let mut bridge_b = CollabBridge::new();
+
+    let r = session_a.execute("shape.rectangle", &json!({ "x": 10.0, "y": 20.0, "width": 80.0, "height": 50.0 })).expect("create rect");
+    let rect_id = NodeId(r["id"].as_u64().expect("id"));
+
+    // Sync bridge_a from session_a
+    bridge_a.sync_from_session(&session_a).expect("sync_from_session");
+
+    // Export full update snapshot
+    let snapshot = bridge_a.export_update();
+    assert!(!snapshot.is_empty(), "snapshot must contain data");
+
+    // Apply snapshot to fresh bridge_b / session_b
+    bridge_b.apply_remote_update(&mut session_b, &snapshot).expect("apply snapshot");
+
+    let node_b = session_b.doc().expect("doc_b").doc.node(rect_id).expect("node in b");
+    assert_eq!(node_b.geometric_bounds(), Some(vectorcraft_geom::Rect::new(10.0, 20.0, 90.0, 70.0)));
+    check_session(&session_b).expect("invariants on session_b");
+}

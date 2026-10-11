@@ -1,0 +1,53 @@
+# ==============================================================================
+# Docker Build Context Exclusions
+# ==============================================================================
+
+# Build artifacts and targets (CRITICAL: prevents copying 35GB host target/)
+target/
+**/target/
+dist/
+**/dist/
+**/*.wasm
+**/*.rs.bk
+
+# Version control
+.git/
+.gitignore
+.github/
+
+# Teamwork & Agent workspaces
+.agents/
+plan/
+
+# Documentation and assets not needed for compilation
+docs/
+examples/
+packaging/
+contributors/
+corpus/
+log/
+craft-fonts/
+
+# Environment files and credentials (ZERO SECRET LEAKAGE)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+*.secret
+*.token
+*.credentials
+id_rsa*
+id_ed25519*
+
+# OS and Editor metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

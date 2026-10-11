@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*", "xtask"]
-default-members = ["crates/*", "apps/vectorcraft", "apps/vectorcraft-cli", "xtask"]
+default-members = ["crates/*", "apps/vectorcraft", "apps/vectorcraft-cli", "apps/vectorcraft-server", "xtask"]
 
 [workspace.package]
 version = "0.7.0"
@@ -40,6 +40,7 @@ peniko = "0.6"
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+yrs = "0.28"
 log = "0.4"
 proptest = "1"
 # tests: a TCP port bound without listening (connections to it are refused)

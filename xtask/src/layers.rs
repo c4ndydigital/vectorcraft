@@ -54,6 +54,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("vectorcraft", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
+    ("server", Class::Exempt),
     ("xtask", Class::Exempt),
     // Crates added later (append-only).
     ("cad", Class::Layer(3)),

@@ -1,0 +1,33 @@
+# Nixpacks configuration for VectorCraft on Coolify and Railway
+# Docs: https://nixpacks.com/docs/configuration/file
+
+[variables]
+# Disable musl to ensure standard glibc target and produce ./target/release/vectorcraft-server
+NIXPACKS_NO_MUSL = "1"
+# Default environment variables for the container runtime
+PORT = "8767"
+BIND = "0.0.0.0"
+DIST_DIR = "dist/web"
+
+[phases.setup]
+# Extend Nixpacks default packages with build tools and binaryen (provides wasm-opt for Trunk)
+nixPkgs = ["...", "curl", "pkg-config", "binaryen"]
+
+[phases.install]
+# Provision wasm32-unknown-unknown target and prebuilt trunk binary
+cmds = [
+  "rustup target add wasm32-unknown-unknown || true",
+  "which trunk || (curl -sSfL https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf - -C /usr/local/bin)"
+]
+
+[phases.build]
+# 1. Build the production WebAssembly bundle into dist/web
+# 2. Compile ONLY the headless server binary (avoids attempting to build desktop GUI apps)
+cmds = [
+  "cd apps/vectorcraft-web && trunk build --release",
+  "cargo build --release --bin vectorcraft-server"
+]
+
+[start]
+# Launch server with dynamic $PORT and $BIND expansion (fallback to 8767 / 0.0.0.0)
+cmd = "./target/release/vectorcraft-server --port ${PORT:-8767} --bind ${BIND:-0.0.0.0} --dist dist/web"

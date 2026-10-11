@@ -43,7 +43,7 @@ fn line(p: &mut Ink, a: Pos2, b: Pos2) {
     p.line_segment([a, b], Stroke::new(1.2, INK));
 }
 
-fn arrow_points(o: Pos2) -> Vec<Pos2> {
+pub(crate) fn arrow_points(o: Pos2) -> Vec<Pos2> {
     // Classic pointer, tip at o.
     [(0.0, 0.0), (0.0, 15.0), (3.8, 11.4), (6.4, 17.0), (8.6, 16.0), (6.1, 10.6), (11.0, 10.6)].iter().map(|(x, y)| o + vec2(*x, *y)).collect()
 }

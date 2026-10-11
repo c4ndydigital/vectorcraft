@@ -13,10 +13,90 @@ use vectorcraft_ui_egui::graphics::GraphicsLoss;
 use vectorcraft_ui_egui::i18n;
 use vectorcraft_ui_egui::place::{DropTarget, PlaceArrival, PlaceInbox};
 use vectorcraft_ui_egui::print::{PrintJob, PrintService, Printer};
-use vectorcraft_ui_egui::{Services, VectorcraftApp};
+use vectorcraft_ui_egui::{CollabIncoming, CollabOutgoing, PeerPresence, Services, VectorcraftApp};
 use wasm_bindgen::JsCast as _;
 
 use crate::locks::WebLocks;
+
+pub mod ws {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        pub type WebSocket;
+
+        #[wasm_bindgen(constructor, catch)]
+        pub fn new(url: &str) -> Result<WebSocket, JsValue>;
+
+        #[wasm_bindgen(method, getter, js_name = binaryType)]
+        pub fn binary_type(this: &WebSocket) -> String;
+
+        #[wasm_bindgen(method, setter, js_name = binaryType)]
+        pub fn set_binary_type(this: &WebSocket, val: &str);
+
+        #[wasm_bindgen(method, getter, js_name = readyState)]
+        pub fn ready_state(this: &WebSocket) -> u16;
+
+        #[wasm_bindgen(method, catch, js_name = send)]
+        pub fn send_with_str(this: &WebSocket, data: &str) -> Result<(), JsValue>;
+
+        #[wasm_bindgen(method, catch, js_name = send)]
+        pub fn send_with_u8_array(this: &WebSocket, data: &[u8]) -> Result<(), JsValue>;
+
+        #[wasm_bindgen(method, setter, js_name = onmessage)]
+        pub fn set_onmessage(this: &WebSocket, val: Option<&js_sys::Function>);
+
+        #[wasm_bindgen(method, setter, js_name = onopen)]
+        pub fn set_onopen(this: &WebSocket, val: Option<&js_sys::Function>);
+
+        #[wasm_bindgen(method, setter, js_name = onerror)]
+        pub fn set_onerror(this: &WebSocket, val: Option<&js_sys::Function>);
+
+        #[wasm_bindgen(method, setter, js_name = onclose)]
+        pub fn set_onclose(this: &WebSocket, val: Option<&js_sys::Function>);
+
+        #[wasm_bindgen(method, catch, js_name = close)]
+        pub fn close(this: &WebSocket) -> Result<(), JsValue>;
+
+        #[wasm_bindgen(extends = web_sys::Event)]
+        pub type MessageEvent;
+        #[wasm_bindgen(method, getter, js_name = data)]
+        pub fn data(this: &MessageEvent) -> JsValue;
+
+        #[wasm_bindgen(extends = web_sys::Event)]
+        pub type CloseEvent;
+        #[wasm_bindgen(method, getter, js_name = code)]
+        pub fn code(this: &CloseEvent) -> u16;
+        #[wasm_bindgen(method, getter, js_name = reason)]
+        pub fn reason(this: &CloseEvent) -> String;
+
+        #[wasm_bindgen(extends = web_sys::Event)]
+        pub type ErrorEvent;
+        #[wasm_bindgen(method, getter, js_name = message)]
+        pub fn message(this: &ErrorEvent) -> String;
+    }
+
+    impl WebSocket {
+        pub const CONNECTING: u16 = 0;
+        pub const OPEN: u16 = 1;
+        pub const CLOSING: u16 = 2;
+        pub const CLOSED: u16 = 3;
+    }
+}
+
+/// Dynamically resolve WebSocket URL for collaboration sync: ws://{host}/ws (or wss://).
+pub fn resolve_ws_url() -> Result<String, String> {
+    let window = web_sys::window().ok_or_else(|| "missing window".to_string())?;
+    let location = window.location();
+    let host = location.host().map_err(|e| format!("couldn't get location.host: {e:?}"))?;
+    if host.is_empty() {
+        return Err("empty location.host".to_string());
+    }
+    let protocol = location.protocol().map_err(|e| format!("couldn't get location.protocol: {e:?}"))?;
+    let search = location.search().unwrap_or_default();
+    let ws_protocol = if protocol == "https:" { "wss" } else { "ws" };
+    Ok(format!("{ws_protocol}://{host}/ws{search}"))
+}
 
 type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
@@ -52,6 +132,9 @@ struct Host {
     locks: Option<WebLocks>,
     /// Graphics restarts so far.
     restarts: u32,
+    collab_inbox: Arc<Mutex<Vec<CollabIncoming>>>,
+    collab_outbox: Arc<Mutex<Vec<CollabOutgoing>>>,
+    ws: Rc<RefCell<Option<ws::WebSocket>>>,
 }
 
 pub fn start() {
@@ -72,6 +155,9 @@ pub fn start() {
             pasted: Rc::default(),
             locks,
             restarts: 0,
+            collab_inbox: Arc::default(),
+            collab_outbox: Arc::default(),
+            ws: Rc::new(RefCell::new(None)),
         };
         track_paste(&host.pasted);
         run(host, canvas, None).await;
@@ -107,7 +193,15 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                     rs.device.set_device_lost_callback(move |reason, msg| loss.report(&ctx, format!("{reason:?}: {msg}")));
                 }
                 host.pasted.borrow_mut().ctx = Some(ctx.clone());
-                let services = services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone());
+                connect_collab(host.collab_inbox.clone(), ctx.clone(), host.ws.clone());
+                let services = services(
+                    host.inbox.clone(),
+                    host.place_inbox.clone(),
+                    ctx.clone(),
+                    host.locks.clone(),
+                    host.collab_inbox.clone(),
+                    host.collab_outbox.clone(),
+                );
                 let app = match taken.borrow_mut().take() {
                     Some(mut app) => {
                         // The old services asked the old context for frames.
@@ -115,7 +209,24 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                         app.status("The graphics were lost and have been restarted");
                         app
                     }
-                    None => VectorcraftApp::new(Session::new(), services),
+                    None => {
+                        let mut app = VectorcraftApp::new(Session::new(), services);
+                        let _ = app.run("file.new", vectorcraft_ui_egui::serde_json::json!({"width": 800.0, "height": 600.0}));
+                        if let Some(win) = web_sys::window() {
+                            let loc = win.location();
+                            let origin = loc.origin().unwrap_or_else(|_| "http://192.168.10.19:8767".to_string());
+                            let search = loc.search().unwrap_or_default();
+                            let room_id = search
+                                .trim_start_matches('?')
+                                .split('&')
+                                .find_map(|p| p.strip_prefix("room="))
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| format!("c4ndy-{}", (app.collab_client_id % 9000 + 1000)));
+                            app.collab_room_id = room_id.clone();
+                            app.collab_share_url = format!("{origin}/?room={room_id}");
+                        }
+                        app
+                    }
                 };
                 Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss }))
             }),
@@ -333,6 +444,41 @@ impl WebShell {
             }
         }
     }
+
+    fn drain_collab_outbox(&self) {
+        let Some(app) = &self.app else { return };
+        let Some(outbox) = &app.services.collab_outbox else { return };
+        let ws_guard = self.host.ws.borrow();
+        let Some(ws) = ws_guard.as_ref() else { return };
+        if ws.ready_state() != ws::WebSocket::OPEN {
+            return;
+        }
+
+        let outgoing: Vec<CollabOutgoing> = {
+            let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *g)
+        };
+
+        for msg in outgoing {
+            match msg {
+                CollabOutgoing::Update(bytes) => {
+                    if let Err(e) = ws.send_with_u8_array(&bytes) {
+                        log::error!("collab: send update failed: {e:?}");
+                    }
+                }
+                CollabOutgoing::Presence(presence) => match vectorcraft_ui_egui::serde_json::to_string(&presence) {
+                    Ok(json) => {
+                        if let Err(e) = ws.send_with_str(&json) {
+                            log::error!("collab: send presence failed: {e:?}");
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("collab: serialize presence failed: {e}");
+                    }
+                },
+            }
+        }
+    }
 }
 
 impl eframe::App for WebShell {
@@ -371,6 +517,7 @@ impl eframe::App for WebShell {
             }
         }
         app.logic(ctx);
+        self.drain_collab_outbox();
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -383,10 +530,80 @@ impl eframe::App for WebShell {
         if let Some(app) = &mut self.app {
             app.ui(ui);
         }
+        self.drain_collab_outbox();
     }
 }
 
-fn services(inbox: Inbox, place_inbox: PlaceInbox, ctx: egui::Context, locks: Option<WebLocks>) -> Services {
+fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws_slot: Rc<RefCell<Option<ws::WebSocket>>>) {
+    if ws_slot.borrow().is_some() {
+        return;
+    }
+    let url = match resolve_ws_url() {
+        Ok(u) => u,
+        Err(e) => {
+            log::warn!("collab: couldn't resolve WebSocket URL: {e}");
+            return;
+        }
+    };
+    log::info!("collab: connecting to {url}");
+    let socket = match ws::WebSocket::new(&url) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("collab: failed to create WebSocket: {e:?}");
+            return;
+        }
+    };
+    socket.set_binary_type("arraybuffer");
+
+    let inbox_msg = inbox.clone();
+    let ctx_msg = ctx.clone();
+    let onmessage = wasm_bindgen::closure::Closure::<dyn FnMut(ws::MessageEvent)>::new(move |e: ws::MessageEvent| {
+        let data = e.data();
+        if let Some(buf) = data.dyn_ref::<js_sys::ArrayBuffer>() {
+            let bytes = js_sys::Uint8Array::new(buf).to_vec();
+            inbox_msg.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::Update(bytes));
+            ctx_msg.request_repaint();
+        } else if let Some(txt) = data.as_string() {
+            if let Ok(presence) = vectorcraft_ui_egui::serde_json::from_str::<PeerPresence>(&txt) {
+                inbox_msg.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::Presence(presence));
+                ctx_msg.request_repaint();
+            } else {
+                log::warn!("collab: failed to parse incoming presence JSON: {txt}");
+            }
+        }
+    });
+    socket.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+    onmessage.forget();
+
+    let onopen = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        log::info!("collab: WebSocket connected");
+    });
+    socket.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+    onopen.forget();
+
+    let onerror = wasm_bindgen::closure::Closure::<dyn FnMut(ws::ErrorEvent)>::new(move |e: ws::ErrorEvent| {
+        log::error!("collab: WebSocket error: {}", e.message());
+    });
+    socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+    onerror.forget();
+
+    let onclose = wasm_bindgen::closure::Closure::<dyn FnMut(ws::CloseEvent)>::new(move |e: ws::CloseEvent| {
+        log::info!("collab: WebSocket closed: code={}, reason={}", e.code(), e.reason());
+    });
+    socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+    onclose.forget();
+
+    *ws_slot.borrow_mut() = Some(socket);
+}
+
+fn services(
+    inbox: Inbox,
+    place_inbox: PlaceInbox,
+    ctx: egui::Context,
+    locks: Option<WebLocks>,
+    collab_inbox: Arc<Mutex<Vec<CollabIncoming>>>,
+    collab_outbox: Arc<Mutex<Vec<CollabOutgoing>>>,
+) -> Services {
     let open_inbox = inbox.clone();
     let picked = place_inbox.clone();
     let place_ctx = ctx.clone();
@@ -428,6 +645,8 @@ fn services(inbox: Inbox, place_inbox: PlaceInbox, ctx: egui::Context, locks: Op
             }
         })),
         inbox: Some(inbox),
+        collab_inbox: Some(collab_inbox),
+        collab_outbox: Some(collab_outbox),
         recovery_store: Some(Arc::new(BrowserStore { locks })),
         // File → Print: the browser's print dialog.
         print: Some(Box::new(BrowserPrint)),

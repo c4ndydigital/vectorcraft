@@ -30,6 +30,7 @@ COPY Cargo.toml Cargo.lock clippy.toml rustfmt.toml ./
 COPY crates/ crates/
 COPY apps/ apps/
 COPY xtask/ xtask/
+COPY assets/ assets/
 
 # Build production WebAssembly client bundle into dist/web
 RUN cd apps/vectorcraft-web && trunk build --release

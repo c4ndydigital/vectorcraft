@@ -4544,6 +4544,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -5280,9 +5281,12 @@ version = "0.10.0"
 dependencies = [
  "axum",
  "futures-util",
+ "http-body-util",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tower-http",
  "yrs",
 ]

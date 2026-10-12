@@ -79,15 +79,22 @@ COPY --from=builder /usr/src/vectorcraft/target/release/vectorcraft-server /usr/
 # Copy compiled web assets from builder
 COPY --from=builder /usr/src/vectorcraft/dist/web /app/dist/web
 
-# Ensure proper permissions
-RUN chown -R vectorcraft:vectorcraft /app && \
+# Ensure persistent fonts cache directory exists and set proper permissions
+RUN mkdir -p /app/fonts_cache && \
+    chown -R vectorcraft:vectorcraft /app && \
     chmod +x /usr/local/bin/vectorcraft-server
+
+# Persistent volume for DSGVO-compliant self-hosted font cache
+VOLUME ["/app/fonts_cache"]
 
 # Runtime environment defaults (overridable in Coolify)
 ENV PORT=8767
 ENV BIND=0.0.0.0
 ENV DIST_PATH=/app/dist/web
 ENV RUST_LOG=info
+ENV FONTS_CACHE_DIR=/app/fonts_cache
+ENV FONTS_PROXY_ENABLED=true
+ENV FONTS_CDN_UPSTREAM=https://cdn.jsdelivr.net/gh/google/fonts@main
 
 # Expose default port
 EXPOSE 8767

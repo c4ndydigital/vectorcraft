@@ -24,8 +24,9 @@ use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use vectorcraft_server::{
-    AuthResult, LegalConfig, REJECTED_BY_LIMIT_COUNT, ResourceMetrics, UmamiConfig, check_bearer_auth, inject_umami, read_cgroup_memory,
-    read_process_rss, render_datenschutz, render_impressum,
+    AuthResult, FontCdnConfig, FontError, LegalConfig, REJECTED_BY_LIMIT_COUNT, ResourceMetrics, UmamiConfig, check_bearer_auth,
+    count_cached_fonts, fetch_and_cache_font, font_mime_type, inject_umami, read_cgroup_memory, read_process_rss, render_datenschutz,
+    render_impressum,
 };
 use yrs::updates::decoder::Decode;
 use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
@@ -145,15 +146,18 @@ pub struct AppState {
     pub rooms: Arc<Mutex<HashMap<String, RoomState>>>,
     pub limits: ServerLimits,
     pub dist_path: PathBuf,
+    pub fonts_config: FontCdnConfig,
     pub active_connections: Arc<AtomicUsize>,
     pub start_time: Instant,
 }
 
 impl AppState {
     pub fn new(dist_path: PathBuf) -> Self {
+        let fonts_config = FontCdnConfig::from_env(&dist_path);
         Self {
             rooms: Arc::new(Mutex::new(HashMap::new())),
             limits: ServerLimits::default(),
+            fonts_config,
             dist_path,
             active_connections: Arc::new(AtomicUsize::new(0)),
             start_time: Instant::now(),
@@ -370,6 +374,42 @@ async fn get_blob_handler(
     response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400, immutable"));
 
     Ok((StatusCode::OK, response_headers, bytes))
+}
+
+async fn font_status_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let cached_fonts_count = count_cached_fonts(&state.fonts_config.cache_dir);
+    let resp = serde_json::json!({
+        "enabled": state.fonts_config.enabled,
+        "cache_dir": state.fonts_config.cache_dir.display().to_string(),
+        "cached_fonts_count": cached_fonts_count,
+        "upstream_base": state.fonts_config.upstream_base,
+        "dsgvo_compliant": true,
+        "note": "100% self-hosted font proxy. Zero client telemetry or requests forwarded to 3rd party CDNs."
+    });
+    (StatusCode::OK, [(CONTENT_TYPE, "application/json")], resp.to_string())
+}
+
+async fn font_proxy_handler(
+    AxumPath(path): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    match fetch_and_cache_font(&state.fonts_config, &state.dist_path, &path).await {
+        Ok((bytes, is_hit)) => {
+            let mime = font_mime_type(&path);
+            let mut headers = HeaderMap::new();
+            if let Ok(val) = HeaderValue::from_str(mime) {
+                headers.insert(CONTENT_TYPE, val);
+            }
+            headers.insert(CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+            headers.insert(HeaderName::from_static("x-cache"), HeaderValue::from_static(if is_hit { "HIT" } else { "MISS" }));
+            headers.insert(HeaderName::from_static("access-control-allow-origin"), HeaderValue::from_static("*"));
+            Ok((StatusCode::OK, headers, bytes))
+        }
+        Err(FontError::InvalidPath(_)) => Err(StatusCode::BAD_REQUEST),
+        Err(FontError::NotFound) => Err(StatusCode::NOT_FOUND),
+        Err(FontError::ProxyDisabled) => Err(StatusCode::NOT_FOUND),
+        Err(FontError::FetchError(_) | FontError::Io(_)) => Err(StatusCode::BAD_GATEWAY),
+    }
 }
 
 async fn index_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -598,6 +638,9 @@ pub fn build_app(state: AppState, dist_path: &Path) -> Router {
         .route("/metrics", get(metrics_or_status_handler))
         .route("/ws", get(ws_handler))
         .route("/api/rooms/{room_id}/blobs/{hash}", get(get_blob_handler).post(upload_blob_handler))
+        .route("/api/fonts/status", get(font_status_handler))
+        .route("/fonts/{*path}", get(font_proxy_handler))
+        .route("/api/fonts/{*path}", get(font_proxy_handler))
         .fallback_service(serve_dir)
         .layer(from_fn(security_headers_middleware))
         .layer(compression)
@@ -613,6 +656,8 @@ fn print_banner(bind: &str, port: u16, dist: &Path) {
     println!("  WebSocket sync:  ws://{bind}:{port}/ws");
     println!("  Static dist:     {}", dist.display());
     println!("  Health check:    http://{bind}:{port}/health");
+    println!("  Fonts CDN Proxy: http://{bind}:{port}/fonts/ (DSGVO compliant)");
+    println!("  Font Status:     http://{bind}:{port}/api/fonts/status");
     println!("  Impressum:       http://{bind}:{port}/impressum");
     println!("  Datenschutz:     http://{bind}:{port}/datenschutz");
     println!("  Metrics/Status:  http://{bind}:{port}/status (Bearer protected)");

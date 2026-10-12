@@ -407,7 +407,202 @@ pub enum AuthResult {
 }
 
 // Global rejected-by-limit counter
+// Global rejected-by-limit counter
 pub static REJECTED_BY_LIMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+// ==============================================================================
+// Self-Hosted DSGVO / GDPR Compliant Font CDN & Proxy Service
+// ==============================================================================
+
+/// Configuration for the font CDN cache and on-demand proxy service.
+#[derive(Clone, Debug)]
+pub struct FontCdnConfig {
+    pub enabled: bool,
+    pub cache_dir: std::path::PathBuf,
+    pub upstream_base: String,
+}
+
+impl FontCdnConfig {
+    pub fn from_env(dist_path: &std::path::Path) -> Self {
+        let enabled = std::env::var("FONTS_PROXY_ENABLED")
+            .map(|v| v != "0" && v != "false" && v != "no")
+            .unwrap_or(true);
+        let cache_dir = std::env::var("FONTS_CACHE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| dist_path.join("fonts"));
+        let upstream_base = std::env::var("FONTS_CDN_UPSTREAM")
+            .unwrap_or_else(|_| "https://cdn.jsdelivr.net/gh/google/fonts@main".to_string());
+        Self { enabled, cache_dir, upstream_base }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FontError {
+    #[error("invalid font path: {0}")]
+    InvalidPath(String),
+    #[error("font proxy is disabled")]
+    ProxyDisabled,
+    #[error("font not found on upstream CDN")]
+    NotFound,
+    #[error("network or fetch error: {0}")]
+    FetchError(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Sanitizes relative font path, rejecting any directory traversal (`..`, absolute paths, illegal characters).
+pub fn sanitize_font_path(path: &str) -> Result<String, FontError> {
+    let clean = path.trim().trim_start_matches('/');
+    if clean.is_empty() {
+        return Err(FontError::InvalidPath("empty path".to_string()));
+    }
+    for seg in clean.split('/') {
+        if seg == ".." || seg == "." || seg.contains('\\') || seg.is_empty() {
+            return Err(FontError::InvalidPath(format!("illegal path segment `{seg}`")));
+        }
+    }
+    Ok(clean.to_string())
+}
+
+/// Returns the MIME content type based on font file extension.
+pub fn font_mime_type(path: &str) -> &'static str {
+    if path.ends_with(".woff2") {
+        "font/woff2"
+    } else if path.ends_with(".woff") {
+        "font/woff"
+    } else if path.ends_with(".ttf") {
+        "font/ttf"
+    } else if path.ends_with(".otf") {
+        "font/otf"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// Counts total cached font files inside the cache directory.
+pub fn count_cached_fonts(dir: &std::path::Path) -> usize {
+    if !dir.exists() {
+        return 0;
+    }
+    let mut count = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(current) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.is_file() {
+                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if ext == "woff2" || ext == "woff" || ext == "ttf" || ext == "otf" {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Fetches a font from disk cache or on-demand from upstream CDN.
+/// Returns `(bytes, is_hit)`.
+pub async fn fetch_and_cache_font(
+    config: &FontCdnConfig,
+    dist_path: &std::path::Path,
+    path: &str,
+) -> Result<(Vec<u8>, bool), FontError> {
+    let clean = sanitize_font_path(path)?;
+
+    // 1. Check local cache dir
+    let cached_file = config.cache_dir.join(&clean);
+    if cached_file.is_file() {
+        if let Ok(bytes) = tokio::fs::read(&cached_file).await {
+            if !bytes.is_empty() {
+                return Ok((bytes, true));
+            }
+        }
+    }
+
+    // 2. Check dist_path/fonts
+    let dist_file = dist_path.join("fonts").join(&clean);
+    if dist_file.is_file() {
+        if let Ok(bytes) = tokio::fs::read(&dist_file).await {
+            if !bytes.is_empty() {
+                return Ok((bytes, true));
+            }
+        }
+    }
+
+    // 3. If proxy is disabled, return NotFound
+    if !config.enabled {
+        return Err(FontError::ProxyDisabled);
+    }
+
+    // 4. On-demand upstream fetch via server-side curl (100% DSGVO compliant: client never contacts Google/upstream)
+    let mut candidate_urls = vec![
+        format!("{}/{}", config.upstream_base.trim_end_matches('/'), clean),
+        format!("https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/{}", clean),
+        format!("https://cdn.jsdelivr.net/gh/google/fonts@main/apache/{}", clean),
+        format!("https://cdn.jsdelivr.net/gh/google/fonts@main/ufl/{}", clean),
+        format!("https://cdn.jsdelivr.net/gh/google/fonts@main/{}", clean),
+        format!("https://cdn.jsdelivr.net/npm/@fontsource/{}", clean),
+        format!("https://raw.githubusercontent.com/google/fonts/main/ofl/{}", clean),
+        format!("https://raw.githubusercontent.com/google/fonts/main/{}", clean),
+    ];
+
+    if let Some((family, file)) = clean.split_once('/') {
+        if !file.starts_with("files/") {
+            candidate_urls.push(format!("https://cdn.jsdelivr.net/npm/@fontsource/{}/files/{}", family, file));
+        }
+    }
+
+    let tmp_dir = config.cache_dir.join(".tmp");
+    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_file = tmp_dir.join(format!("fetch-{}-{}", std::process::id(), nonce));
+
+    let mut fetched_bytes: Option<Vec<u8>> = None;
+
+    for url in candidate_urls {
+        let status = tokio::process::Command::new("curl")
+            .args(["-sSL", "--fail", "--max-time", "15", &url, "-o"])
+            .arg(&tmp_file)
+            .status()
+            .await;
+
+        if let Ok(exit) = status {
+            if exit.success() {
+                if let Ok(bytes) = tokio::fs::read(&tmp_file).await {
+                    if !bytes.is_empty() {
+                        fetched_bytes = Some(bytes);
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = tokio::fs::remove_file(&tmp_file).await;
+    }
+
+    let Some(bytes) = fetched_bytes else {
+        let _ = tokio::fs::remove_file(&tmp_file).await;
+        return Err(FontError::NotFound);
+    };
+
+    // Store into cache_dir
+    if let Some(parent) = cached_file.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    if tokio::fs::rename(&tmp_file, &cached_file).await.is_err() {
+        let _ = tokio::fs::write(&cached_file, &bytes).await;
+    }
+
+    Ok((bytes, false))
+}
 
 #[cfg(test)]
 mod tests {
@@ -517,4 +712,41 @@ mod tests {
         // Authorized when token matches
         assert_eq!(check_bearer_auth(Some("Bearer secret123"), Some("secret123")), AuthResult::Authorized);
     }
+
+    #[test]
+    fn test_sanitize_font_path() {
+        assert_eq!(sanitize_font_path("inter/inter-latin-400-normal.woff2").unwrap(), "inter/inter-latin-400-normal.woff2");
+        assert_eq!(sanitize_font_path("/roboto/Roboto-Regular.ttf").unwrap(), "roboto/Roboto-Regular.ttf");
+        assert!(sanitize_font_path("../secret.txt").is_err());
+        assert!(sanitize_font_path("inter/../../etc/passwd").is_err());
+        assert!(sanitize_font_path("").is_err());
+        assert!(sanitize_font_path("   ").is_err());
+        assert!(sanitize_font_path("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn test_font_mime_type() {
+        assert_eq!(font_mime_type("font.woff2"), "font/woff2");
+        assert_eq!(font_mime_type("font.woff"), "font/woff");
+        assert_eq!(font_mime_type("font.ttf"), "font/ttf");
+        assert_eq!(font_mime_type("font.otf"), "font/otf");
+        assert_eq!(font_mime_type("metadata.json"), "application/json");
+        assert_eq!(font_mime_type("other.bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_count_cached_fonts() {
+        let temp_dir = std::env::temp_dir().join(format!("test-fonts-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let sub = temp_dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        std::fs::write(temp_dir.join("a.woff2"), b"dummy").unwrap();
+        std::fs::write(sub.join("b.ttf"), b"dummy").unwrap();
+        std::fs::write(sub.join("c.txt"), b"dummy").unwrap(); // not a font
+
+        assert_eq!(count_cached_fonts(&temp_dir), 2);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
+

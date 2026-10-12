@@ -41,8 +41,13 @@ COPY assets/ assets/
 # Build production WebAssembly client bundle into dist/web and precompress
 RUN cd apps/vectorcraft-web && trunk build --release --minify
 RUN cd dist/web && \
-    gzip -k -9 *.wasm *.js *.html *.css && \
-    brotli -k -q 11 *.wasm *.js *.html *.css
+    for ext in wasm js html css svg ico; do \
+        for f in *.$ext; do \
+            [ -f "$f" ] || continue; \
+            gzip -k -9 "$f"; \
+            brotli -k -q 11 "$f"; \
+        done; \
+    done
 
 # Build production backend server binary
 RUN cargo build --release --bin vectorcraft-server

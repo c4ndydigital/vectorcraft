@@ -73,11 +73,20 @@ pub(crate) fn all_shortcuts() -> Vec<(KeyboardShortcut, &'static str, serde_json
             v.push((sc, "window.panel", json!({ "panel": panel })));
         }
     }
+    settings_chord(&mut v, cfg!(target_os = "macos"));
     // Most specific (most modifiers) first so Cmd+Shift+Z isn't eaten by Cmd+Z.
     v.sort_by_key(|(sc, ..)| {
         std::cmp::Reverse(sc.modifiers.shift as u8 + sc.modifiers.alt as u8 + sc.modifiers.command as u8 + sc.modifiers.ctrl as u8)
     });
     v
+}
+
+/// On a Mac, Cmd+, opens Settings as in every Mac app (#663), beside Preferences' own shortcut,
+/// unless a command or a user's shortcut already took it.
+fn settings_chord(v: &mut Vec<(KeyboardShortcut, &'static str, serde_json::Value)>, mac: bool) {
+    if let Some(sc) = parse("Cmd+,").filter(|sc| mac && !v.iter().any(|(s, ..)| s == sc)) {
+        v.push((sc, "edit.preferences", json!({})));
+    }
 }
 
 /// Consume a press of `sc`. A `=` chord also takes [`Key::Plus`], which is how `+` arrives from
@@ -204,16 +213,24 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context) {
         return;
     }
     if app.ui.dialog.is_some() || app.ui.palette_open {
+        if app.ui.dialog.as_ref().is_some_and(crate::dialogs::revolve_gizmo::active) && crate::dialogs::revolve_gizmo::dragging(ctx) {
+            // Escape first restores this rotation gesture. The settings stay open.
+            return;
+        }
         if crate::shortcut_editor::is_recording(app) {
             return;
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            app.ui.dialog = None;
+            crate::dialogs::cancel(app);
             app.ui.palette_open = false;
         }
         return;
     }
     let typing = ctx.egui_wants_keyboard_input();
+    // Escape closes Edit Toolbar's drawer first (egui drops a drag from it on Escape already).
+    if app.ui.tools_drawer && !typing && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        app.ui.tools_drawer = false;
+    }
     let view = app.view_info();
     // While an IME composes, Enter and Escape are its own (confirm / cancel).
     let composing = app.session.tool_composing();
@@ -405,12 +422,18 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context) {
     {
         let _ = app.run("edit.clear", json!({}));
     }
-    // Single-key tool shortcuts (no Cmd/Ctrl/Alt).
+    // Single-key tool shortcuts (no Cmd/Ctrl/Alt). With a layout without Latin letters (Persian,
+    // Arabic, Russian, Greek…) the key's position stands in for what it types (#793).
     let events: Vec<(String, Modifiers)> = ctx.input(|i| {
+        let mut physical = None;
         i.events
             .iter()
             .filter_map(|e| match e {
-                egui::Event::Text(t) => Some((t.clone(), i.modifiers)),
+                egui::Event::Key { physical_key, pressed: true, .. } => {
+                    physical = *physical_key;
+                    None
+                }
+                egui::Event::Text(t) => Some((latin(t, physical), i.modifiers)),
                 _ => None,
             })
             .collect()
@@ -436,6 +459,16 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context) {
     }
 }
 
+/// What a single-key shortcut reads for `text`, typed by the key at `physical`: the text itself,
+/// or, when it holds no ASCII character (a layout without Latin letters), what that key types on a
+/// US layout, so V selects the Selection tool whatever the V key types.
+fn latin(text: &str, physical: Option<Key>) -> String {
+    match physical {
+        Some(k) if !text.is_ascii() => k.symbol_or_name().to_lowercase(),
+        _ => text.to_string(),
+    }
+}
+
 /// The digit a number-row or keypad key types.
 fn digit_of(k: Key) -> Option<u8> {
     const DIGITS: [Key; 10] = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
@@ -455,6 +488,69 @@ mod tests {
         });
         out.textures_delta.clear();
         out
+    }
+
+    /// Cmd+Shift+B while the Type tool edits text is Type › Bold, not Hide Bounding Box (#724).
+    #[test]
+    fn cmd_shift_b_while_typing_is_bold_not_the_bounding_box() {
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        app.session.execute("file.new", &json!({"width": 200, "height": 200})).unwrap();
+        app.select_tool("type");
+        let view = app.view_info();
+        for kind in [vectorcraft_tools::PointerKind::Down, vectorcraft_tools::PointerKind::Up] {
+            app.session.pointer(&vectorcraft_tools::PointerEvent::new(kind, 50.0, 50.0), view).unwrap();
+        }
+        frame(&mut app, vec![egui::Event::Text("Bold".into())]);
+        assert!(app.session.tool_wants_text());
+        let chord =
+            egui::Event::Key { key: Key::B, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND | Modifiers::SHIFT };
+        frame(&mut app, vec![chord.clone()]);
+        assert!(app.ui.view.bounding_box, "the bounding box stays");
+        // The chord reached Bold: the text is in a bold face, or its family has none and says so.
+        let face = crate::panels::character::text_style(&app).map(|(s, _)| s.font_style).unwrap_or_default();
+        assert!(face.contains("Bold") || app.ui.status.contains("has no Bold style"), "{face:?} {:?}", app.ui.status);
+        // Out of the text, the chord hides the bounding box as before.
+        app.select_tool("selection");
+        frame(&mut app, vec![chord]);
+        assert!(!app.ui.view.bounding_box);
+    }
+
+    /// Cmd+Shift+L, C, R, J and F align paragraphs (#1111): every paragraph of the selected type,
+    /// or while the Type tool edits text, those its selection touches.
+    #[test]
+    fn cmd_shift_letters_align_paragraphs() {
+        use vectorcraft_doc::Justify;
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        app.session.execute("file.new", &json!({"width": 200, "height": 200})).unwrap();
+        let id = app.session.execute("text.create", &json!({"x": 20, "y": 50, "text": "One\nTwo"})).unwrap()["id"].as_u64().unwrap();
+        let chord =
+            |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND | Modifiers::SHIFT };
+        let paras = |app: &VectorcraftApp| match &app.session.active().unwrap().doc.node(vectorcraft_doc::NodeId(id)).unwrap().kind {
+            vectorcraft_doc::NodeKind::Text(t) => (0..t.paragraph_count()).map(|i| t.para_at(i).justify).collect::<Vec<_>>(),
+            _ => panic!("text"),
+        };
+        app.session.execute("select.set", &json!({"ids": [id]})).unwrap();
+        for (key, want) in [
+            (Key::C, Justify::Center),
+            (Key::R, Justify::Right),
+            (Key::J, Justify::JustifyLeft),
+            (Key::F, Justify::JustifyAll),
+            (Key::L, Justify::Left),
+        ] {
+            frame(&mut app, vec![chord(key)]);
+            assert_eq!(paras(&app), [want, want], "{key:?}");
+        }
+        // With the Type tool, only the paragraph its selection touches.
+        app.select_tool("type");
+        app.session.apply_actions(vec![vectorcraft_tools::Action::Notify("text.editNew".into())]).unwrap();
+        app.session.set_tool_option("select", &json!({"start": 5, "end": 6}));
+        assert!(app.session.tool_wants_text());
+        frame(&mut app, vec![chord(Key::R)]);
+        assert_eq!(paras(&app), [Justify::Left, Justify::Right]);
+        // Nothing selected: nothing to align.
+        app.select_tool("selection");
+        app.session.execute("select.none", &json!({})).unwrap();
+        assert!(!crate::menus::enabled(&app, "type.alignCenter"));
     }
 
     /// Tab shows and hides the panels, and in the Type tool it types a tab, without moving the
@@ -570,7 +666,8 @@ mod tests {
             out.textures_delta.clear();
         };
         let kind = |app: &VectorcraftApp| app.ui.dialog.as_ref().map(|d| d.kind.clone());
-        let steps = |app: &VectorcraftApp| app.session.active().unwrap().history.undo.len();
+        // The undo steps and the journal entries (the dialog's OK runs its command, which the journal records).
+        let steps = |app: &VectorcraftApp| (app.session.active().unwrap().history.undo.len(), app.session.journal.len());
         app.select_tool("selection");
         frame(&mut app, vec![enter()]);
         assert_eq!(kind(&app), None, "nothing is selected");
@@ -591,9 +688,11 @@ mod tests {
             frame(&mut app, vec![]);
             assert_eq!(kind(&app).as_deref(), Some(dialog), "{tool}: and it stays open");
             assert_eq!(steps(&app), before, "{tool}: the Enter that opened it didn't confirm it");
-            // The next Enter is its OK.
+            // The next Enter is its OK. With its default values only Reflect changes the art, so only
+            // Reflect records an undo step.
             frame(&mut app, vec![enter()]);
-            assert_eq!((kind(&app), steps(&app)), (None, before + 1), "{tool}: Enter confirms");
+            let after = (before.0 + usize::from(dialog == "reflect"), before.1 + 1);
+            assert_eq!((kind(&app), steps(&app)), (None, after), "{tool}: Enter confirms");
         }
         app.select_tool("rectangle");
         frame(&mut app, vec![enter()]);
@@ -644,6 +743,27 @@ mod tests {
         assert_eq!(app.session.tool_id(), "curvature");
     }
 
+    /// #793: with a layout without Latin letters the one-key shortcuts go by the key's position:
+    /// the P key typing Persian `ح` chooses the Pen, the V key typing Russian `м` the Selection
+    /// tool. A Latin layout keeps the letter typed: AZERTY's A (the Q key's place) is A.
+    #[test]
+    fn one_key_shortcuts_follow_the_key_on_layouts_without_latin_letters() {
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        app.session.execute("file.new", &json!({"width": 200, "height": 200})).unwrap();
+        let typed = |key, physical, text: &str| {
+            vec![
+                egui::Event::Key { key, physical_key: Some(physical), pressed: true, repeat: false, modifiers: Modifiers::NONE },
+                egui::Event::Text(text.into()),
+            ]
+        };
+        frame(&mut app, typed(Key::P, Key::P, "ح"));
+        assert_eq!(app.session.tool_id(), "pen");
+        frame(&mut app, typed(Key::V, Key::V, "м"));
+        assert_eq!(app.session.tool_id(), "selection");
+        frame(&mut app, typed(Key::A, Key::Q, "a"));
+        assert_eq!(app.session.tool_id(), "directSelection", "AZERTY: the letter typed");
+    }
+
     #[test]
     fn plus_typed_any_way_zooms_in() {
         assert_eq!(parse("Cmd++"), parse("Cmd+="), "`+` and `=` are one chord key");
@@ -685,6 +805,24 @@ mod tests {
         assert_eq!((preview.0.as_str(), &preview.1["perpendicular"]), ("perspective.move", &json!(true)));
         assert_eq!(digit_of(Key::Num0), Some(0));
         assert_eq!(digit_of(Key::A), None);
+    }
+
+    /// Cmd+, opens Settings on a Mac only, and never takes a chord a command already has.
+    #[test]
+    fn cmd_comma_opens_settings_on_a_mac() {
+        let comma = parse("Cmd+,").unwrap();
+        let mut v = vec![];
+        super::settings_chord(&mut v, false);
+        assert!(v.is_empty(), "not elsewhere");
+        super::settings_chord(&mut v, true);
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].0, v[0].1), (comma, "edit.preferences"));
+        let mut taken = vec![(comma, "view.zoomIn", json!({}))];
+        super::settings_chord(&mut taken, true);
+        assert_eq!(taken.len(), 1, "a command that has it keeps it");
+        if cfg!(target_os = "macos") {
+            assert!(super::all_shortcuts().iter().any(|(sc, id, _)| *sc == comma && *id == "edit.preferences"));
+        }
     }
 
     #[test]

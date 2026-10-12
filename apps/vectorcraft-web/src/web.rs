@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use vectorcraft_engine::Session;
-use vectorcraft_engine::cmd::clipboard::{FILE_HEAD, Flavour, PASTE_ORDER, file_flavour};
+use vectorcraft_engine::cmd::clipboard::{FILE_HEAD, Flavour, PASTE_ORDER, file_flavour, is_address};
 use vectorcraft_engine::cmd::fileio;
 use vectorcraft_engine::cmd::recovery::{self, Hold, RecoveryStore};
 use vectorcraft_ui_egui::graphics::GraphicsLoss;
@@ -146,6 +146,9 @@ pub fn start() {
     wasm_bindgen_futures::spawn_local(async move {
         // Before the first frame, which looks for copies a crash left behind.
         let locks = WebLocks::start(RECOVERY_PREFIX).await;
+        // Fallback fonts the first frame needs (Noto Sans Arabic), fetched while the loading text
+        // shows; the rest load in the background once the app runs.
+        crate::fonts::load_startup_fonts().await;
         let host = Host {
             runner: eframe::WebRunner::new(),
             inbox: Arc::default(),
@@ -180,12 +183,8 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
         let loc = win.location();
         let origin = loc.origin().unwrap_or_else(|_| "https://vector.c4ndy.com".to_string());
         let search = loc.search().unwrap_or_default();
-        let existing_room = search
-            .trim_start_matches('?')
-            .split('&')
-            .find_map(|p| p.strip_prefix("room="))
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
+        let existing_room =
+            search.trim_start_matches('?').split('&').find_map(|p| p.strip_prefix("room=")).filter(|s| !s.is_empty()).map(|s| s.to_string());
 
         let room_id = match existing_room {
             Some(r) => r,
@@ -214,6 +213,7 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
             web_options(),
             Box::new(move |cc| {
                 let ctx = &cc.egui_ctx;
+                crate::fonts::spawn_background_fonts(ctx.clone());
                 let loss = GraphicsLoss::default();
                 watch_canvas(&page, &loss, ctx);
                 if let Some(rs) = &cc.wgpu_render_state {
@@ -331,7 +331,9 @@ fn track_paste(pasted: &Rc<RefCell<Pasted>>) {
     let on_paste = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(move |e: web_sys::ClipboardEvent| {
         let Some(data) = e.clipboard_data() else { return };
         let Some(files) = data.files().filter(|f| f.length() > 0) else { return };
-        if data.get_data("text").is_ok_and(|t| !t.is_empty()) {
+        // Text is egui's, but for the address a browser's Copy Image puts next to the picture.
+        // Blank text is not a caption. A picture pasted with it is still the picture.
+        if data.get_data("text").is_ok_and(|t| !t.trim().is_empty() && !is_address(&t)) {
             return;
         }
         e.prevent_default();
@@ -434,7 +436,8 @@ fn notice(lines: &[&str]) {
 }
 
 /// Wraps the app to read dropped files asynchronously (browsers can't read them synchronously)
-/// and feed them through the inboxes: placed where they were dropped on the canvas, else opened.
+/// and feed them through the inboxes: placed where they were dropped on the canvas, else opened
+/// (libraries, presets and plug-ins open wherever they are dropped).
 /// When the graphics are lost it hands the app to a new runner on a new canvas.
 struct WebShell {
     /// `None` once handed on.
@@ -598,11 +601,9 @@ fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws
         } else if let Some(txt) = data.as_string() {
             if let Ok(v) = vectorcraft_ui_egui::serde_json::from_str::<vectorcraft_ui_egui::serde_json::Value>(&txt) {
                 if v.get("type").and_then(|t| t.as_str()) == Some("blob") {
-                    if let (Some(key), Some(mime), Some(b64)) = (
-                        v.get("key").and_then(|k| k.as_str()),
-                        v.get("mime").and_then(|m| m.as_str()),
-                        v.get("dataBase64").and_then(|d| d.as_str()),
-                    ) {
+                    if let (Some(key), Some(mime), Some(b64)) =
+                        (v.get("key").and_then(|k| k.as_str()), v.get("mime").and_then(|m| m.as_str()), v.get("dataBase64").and_then(|d| d.as_str()))
+                    {
                         if let Some(bytes) = vectorcraft_format::base64_decode(b64) {
                             inbox_msg.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::Blob {
                                 key: key.to_string(),
@@ -662,7 +663,10 @@ fn services(
             let inbox = picked.clone();
             let ctx = place_ctx.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let dialog = fileio::place_filters().fold(rfd::AsyncFileDialog::new().set_title("Place"), |d, (name, exts)| d.add_filter(name, exts));
+                let dialog =
+                    fileio::place_filters().fold(rfd::AsyncFileDialog::new().set_title(vectorcraft_ui_egui::i18n::t("Place")), |d, (name, exts)| {
+                        d.add_filter(vectorcraft_ui_egui::i18n::tr_ctx(vectorcraft_ui_egui::i18n::current(), "file-filter", name), exts)
+                    });
                 let Some(files) = dialog.pick_files().await else {
                     return;
                 };
@@ -679,7 +683,9 @@ fn services(
             let inbox = open_inbox.clone();
             let ctx = ctx.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let dialog = fileio::open_filters().fold(rfd::AsyncFileDialog::new(), |d, (name, exts)| d.add_filter(name, exts));
+                let dialog = fileio::open_filters().fold(rfd::AsyncFileDialog::new(), |d, (name, exts)| {
+                    d.add_filter(vectorcraft_ui_egui::i18n::tr_ctx(vectorcraft_ui_egui::i18n::current(), "file-filter", name), exts)
+                });
                 let Some(file) = dialog.pick_file().await else {
                     return;
                 };

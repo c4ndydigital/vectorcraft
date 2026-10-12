@@ -4,10 +4,12 @@
 
 use egui::Ui;
 use serde_json::json;
-use vectorcraft_doc::NodeKind;
+use vectorcraft_doc::{LiveShape, Node, NodeKind};
 use vectorcraft_geom::Rect;
+use vectorcraft_geom::shapes::CornerKind;
 
 use super::{corner_radius_row, first_selected, pstate, set_pstate};
+use crate::dialogs::corners::kind_label as corner_kind;
 use crate::theme::Tokens;
 use crate::widgets::{self, menu_item};
 use crate::{VectorcraftApp, icons};
@@ -50,12 +52,15 @@ pub fn artboard_rect(r: Rect, refi: usize, x: Option<f64>, y: Option<f64>, w: Op
 /// The Artboard tool's view of the panel: the active artboard's position and size.
 fn artboard_fields(app: &mut VectorcraftApp, ui: &mut Ui, index: usize, r: Rect) {
     let units = app.session.general_unit();
+    let origin = app.ruler_origin();
     let refi: usize = ui.data(|d| d.get_temp(egui::Id::new("refpt"))).unwrap_or(4);
     let link = app.session.prefs.constrain_proportions;
     let rp = vectorcraft_geom::reference_point(r, refi);
     let set = |app: &mut VectorcraftApp, x, y, w, h| {
         let n = artboard_rect(r, refi, x, y, w, h, link);
-        let p = json!({"index": index, "x": n.x0, "y": n.y0, "width": n.width(), "height": n.height()});
+        let scale_art = crate::panels::artboards::scale_art(app);
+        let move_art = crate::panels::artboards::move_art(app);
+        let p = json!({"index": index, "x": n.x0, "y": n.y0, "width": n.width(), "height": n.height(), "scaleArt": scale_art, "moveArt": move_art});
         if let Err(e) = app.run("artboard.setProps", p) {
             app.status(e);
         }
@@ -67,8 +72,8 @@ fn artboard_fields(app: &mut VectorcraftApp, ui: &mut Ui, index: usize, r: Rect)
         ui.add_space(4.0);
         egui::Grid::new("xfp-ab-grid").num_columns(4).spacing([4.0, 6.0]).min_col_width(0.0).show(ui, |ui| {
             widgets::dim_label(ui, "X:");
-            if let Some(v) = widgets::num_field(ui, "xfp-ab-x", Some(rp.x), units, 80.0) {
-                set(app, Some(v), None, None, None);
+            if let Some(v) = widgets::num_field(ui, "xfp-ab-x", Some(rp.x - origin.x), units, 80.0) {
+                set(app, Some(v + origin.x), None, None, None);
             }
             widgets::dim_label(ui, "W:");
             if let Some(v) = widgets::num_field(ui, "xfp-ab-w", Some(r.width()), units, 80.0) {
@@ -76,8 +81,8 @@ fn artboard_fields(app: &mut VectorcraftApp, ui: &mut Ui, index: usize, r: Rect)
             }
             ui.end_row();
             widgets::dim_label(ui, "Y:");
-            if let Some(v) = widgets::num_field(ui, "xfp-ab-y", Some(rp.y), units, 80.0) {
-                set(app, None, Some(v), None, None);
+            if let Some(v) = widgets::num_field(ui, "xfp-ab-y", Some(rp.y - origin.y), units, 80.0) {
+                set(app, None, Some(v + origin.y), None, None);
             }
             widgets::dim_label(ui, "H:");
             if let Some(v) = widgets::num_field(ui, "xfp-ab-h", Some(r.height()), units, 80.0) {
@@ -100,6 +105,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         return;
     }
     let units = app.session.general_unit();
+    let origin = app.ruler_origin();
     // The bounding box, rotated with rotated objects: W/H are its own sides, X/Y its reference
     // point on the page.
     let bx = app.selection_box();
@@ -116,8 +122,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         ui.add_enabled_ui(has, |ui| {
             egui::Grid::new("xfp-grid").num_columns(4).spacing([4.0, 6.0]).min_col_width(0.0).show(ui, |ui| {
                 widgets::dim_label(ui, "X:");
-                if let Some(v) = widgets::num_field(ui, "xfp-x", rp.map(|p| p.x), units, 80.0) {
-                    app.run("object.setBounds", json!({"x": v, "reference": refi})).ok();
+                if let Some(v) = widgets::num_field(ui, "xfp-x", rp.map(|p| p.x - origin.x), units, 80.0) {
+                    app.run("object.setBounds", json!({"x": v + origin.x, "reference": refi})).ok();
                 }
                 widgets::dim_label(ui, "W:");
                 if let Some(v) = widgets::num_field(ui, "xfp-w", bounds.map(|b| b.width()), units, 80.0) {
@@ -125,8 +131,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
                 }
                 ui.end_row();
                 widgets::dim_label(ui, "Y:");
-                if let Some(v) = widgets::num_field(ui, "xfp-y", rp.map(|p| p.y), units, 80.0) {
-                    app.run("object.setBounds", json!({"y": v, "reference": refi})).ok();
+                if let Some(v) = widgets::num_field(ui, "xfp-y", rp.map(|p| p.y - origin.y), units, 80.0) {
+                    app.run("object.setBounds", json!({"y": v + origin.y, "reference": refi})).ok();
                 }
                 widgets::dim_label(ui, "H:");
                 if let Some(v) = widgets::num_field(ui, "xfp-h", bounds.map(|b| b.height()), units, 80.0) {
@@ -163,33 +169,33 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         });
     });
     ui.horizontal(|ui| {
-        if widgets::icon_button_enabled(ui, "flip-horizontal-2", tl!("Flip Horizontal"), false, has, 24.0).clicked() {
+        // Lucide's flip icons are named for their mirror line: flip-vertical-2 draws a vertical
+        // line (the left-right flip), flip-horizontal-2 a horizontal one (top-bottom).
+        if widgets::icon_button_enabled(ui, "flip-vertical-2", tl!("Flip Horizontal"), false, has, 24.0).clicked() {
             app.run("object.reflect", json!({"axis": "vertical", "origin": origin})).ok();
         }
-        if widgets::icon_button_enabled(ui, "flip-vertical-2", tl!("Flip Vertical"), false, has, 24.0).clicked() {
+        if widgets::icon_button_enabled(ui, "flip-horizontal-2", tl!("Flip Vertical"), false, has, 24.0).clicked() {
             app.run("object.reflect", json!({"axis": "horizontal", "origin": origin})).ok();
         }
     });
     // Live shape properties (a path with live corners is no shape).
     if let Some(n) = first_selected(app)
         && let NodeKind::Path { live: Some(live), .. } = &n.kind
-        && !matches!(live, vectorcraft_doc::LiveShape::Path { .. })
+        && !matches!(**live, vectorcraft_doc::LiveShape::Path { .. })
     {
         widgets::divider(ui);
-        match live {
+        match &**live {
             vectorcraft_doc::LiveShape::Rectangle { .. } => {
                 widgets::subheader(ui, tl!("Rectangle Properties:"));
                 corner_radius_row(app, ui, &n, "xfp-radius");
             }
-            vectorcraft_doc::LiveShape::Polygon { sides, .. } => {
+            vectorcraft_doc::LiveShape::Polygon { .. } => {
                 widgets::subheader(ui, tl!("Polygon Properties:"));
-                ui.horizontal(|ui| {
-                    widgets::dim_label(ui, tl!("Sides:"));
-                    if let Some(s) = widgets::plain_field(ui, "xfp-sides", *sides as f64, "", 0, 60.0) {
-                        app.run("object.setLiveShape", json!({"sides": s.clamp(3.0, 20.0) as u32})).ok();
-                    }
-                });
-                corner_radius_row(app, ui, &n, "xfp-radius");
+                polygon_rows(app, ui, &n, live, "xfp-polygon");
+            }
+            vectorcraft_doc::LiveShape::Ellipse { pie, .. } => {
+                widgets::subheader(ui, tl!("Ellipse Properties:"));
+                pie_rows(app, ui, *pie, "xfp-pie");
             }
             _ => {
                 widgets::subheader(ui, tl!("Shape Properties:"));
@@ -207,6 +213,72 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     }
     if widgets::check(ui, tl!("Scale Strokes & Effects"), ss, true) {
         set_pref(app, "scaleStrokes", !ss);
+    }
+}
+
+/// An ellipse's Pie Start and End Angle (degrees, counterclockwise from 3 o'clock; 0 to 360 is the
+/// whole ellipse) and Invert Pie, which shows the other part of it (Transform and Properties panels).
+pub(crate) fn pie_rows(app: &mut VectorcraftApp, ui: &mut Ui, pie: (f64, f64), id: &str) {
+    for (label, key, v) in [(tl!("Pie Start Angle:"), "pieStart", pie.0), (tl!("Pie End Angle:"), "pieEnd", pie.1)] {
+        ui.horizontal(|ui| {
+            widgets::dim_label(ui, label);
+            if let Some(a) = widgets::plain_field(ui, (id, key), v, "°", 1, 60.0) {
+                app.run("object.setLiveShape", json!({ key: a })).ok();
+            }
+        });
+    }
+    if widgets::flat_button(ui, tl!("Invert Pie"), 90.0).clicked() {
+        app.run("object.setLiveShape", json!({"invertPie": true})).ok();
+    }
+}
+
+/// A live polygon's Polygon Properties (Transform and Properties panels): its side count, angle
+/// (counterclockwise), corner type and radius, radius (centre to vertex) and side length, and Make
+/// Sides Equal, which an uneven scale enables.
+pub(crate) fn polygon_rows(app: &mut VectorcraftApp, ui: &mut Ui, n: &Node, live: &LiveShape, id: &str) {
+    let LiveShape::Polygon { sides, .. } = live else { return };
+    let (units, fw) = (app.session.general_unit(), super::field_width(ui));
+    let radius = live.polygon_radius();
+    let side = radius.map(|r| 2.0 * r * (std::f64::consts::PI / f64::from((*sides).max(3))).sin());
+    let kind = super::corner_style(app, n).1;
+    let kinds: Vec<&str> = CornerKind::ALL.iter().map(|k| corner_kind(*k)).collect();
+    // The `object.setLiveShape` param an edited field sets.
+    let mut set = None;
+    egui::Grid::new((id, "grid")).num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
+        widgets::dim_label(ui, tl!("Sides:"));
+        if let Some(s) = widgets::plain_field(ui, (id, "sides"), f64::from(*sides), "", 0, fw) {
+            set = Some(("sides", json!(s.round().max(3.0) as u64)));
+        }
+        ui.end_row();
+        widgets::dim_label(ui, tl!("Angle:"));
+        if let Some(a) = widgets::plain_field(ui, (id, "angle"), live.polygon_angle().unwrap_or(0.0), "°", 1, fw) {
+            set = Some(("polygonAngle", json!(a)));
+        }
+        ui.end_row();
+        widgets::dim_label(ui, tl!("Corner:"));
+        if let Some(k) = widgets::dropdown_names(ui, (id, "kind"), kind.map_or("", corner_kind), &kinds, fw).and_then(|i| CornerKind::ALL.get(i)) {
+            set = Some(("kind", json!(k)));
+        }
+        ui.end_row();
+        widgets::dim_label(ui, tl!("Corner Radius:"));
+        super::corner_radius_field(app, ui, n, (id, "cornerRadius"), fw);
+        ui.end_row();
+        widgets::dim_label(ui, tl!("Radius:"));
+        if let Some(r) = widgets::num_field(ui, (id, "radius"), radius, units, fw) {
+            set = Some(("polygonRadius", json!(r)));
+        }
+        ui.end_row();
+        widgets::dim_label(ui, tl!("Side Length:"));
+        if let Some(l) = widgets::num_field(ui, (id, "side"), side, units, fw) {
+            set = Some(("sideLength", json!(l)));
+        }
+        ui.end_row();
+    });
+    if ui.add_enabled_ui(!live.polygon_sides_equal(), |ui| widgets::flat_button(ui, tl!("Make Sides Equal"), 130.0)).inner.clicked() {
+        set = Some(("makeSidesEqual", json!(true)));
+    }
+    if let Some((key, v)) = set {
+        app.run("object.setLiveShape", json!({ key: v })).ok();
     }
 }
 
@@ -312,6 +384,31 @@ mod tests {
         app.run("object.resetBoundingBox", json!({})).unwrap();
         let shown = texts(&mut app, show);
         assert!(shown.iter().any(|t| t == "0°") && !shown.iter().any(|t| t == "100 pt"), "{shown:?}");
+    }
+
+    /// #812: a selected live polygon shows its Polygon Properties in the Transform panel and the
+    /// Properties panel's Transform section, and Make Sides Equal evens it out after a stretch.
+    #[test]
+    fn a_polygon_shows_its_polygon_properties() {
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        app.run("file.new", json!({"width": 300, "height": 300})).unwrap();
+        app.run("shape.polygon", json!({"cx": 150, "cy": 150, "radius": 50, "sides": 6})).unwrap();
+        for draw in [show as fn(&mut VectorcraftApp, &mut Ui), crate::panels::properties::transform_section] {
+            let shown = texts(&mut app, draw);
+            // A hexagon's side is as long as its radius.
+            for t in ["Sides:", "6", "Angle:", "0°", "Corner:", "Round", "Corner Radius:", "Radius:", "Side Length:", "50 pt", "Make Sides Equal"] {
+                assert!(shown.iter().any(|s| s == t), "{t} in {shown:?}");
+            }
+        }
+        assert!(texts(&mut app, show).iter().any(|s| s == "Polygon Properties:"));
+        app.run("object.scale", json!({"sx": 200, "sy": 100})).unwrap();
+        let live = |app: &VectorcraftApp| match &first_selected(app).unwrap().kind {
+            NodeKind::Path { live: Some(l), .. } => l.clone(),
+            k => panic!("{k:?}"),
+        };
+        assert!(!live(&app).polygon_sides_equal());
+        app.run("object.setLiveShape", json!({"makeSidesEqual": true})).unwrap();
+        assert!(live(&app).polygon_sides_equal());
     }
 
     #[test]

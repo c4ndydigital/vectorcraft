@@ -45,10 +45,14 @@ struct Entry {
 /// The palette's entries in `lang`. They are built when the language, the installed plug-ins or
 /// the keyboard shortcuts (shown beside each entry) change, not on every frame while a query is
 /// typed.
+/// What the entries depend on: the language, the installed plug-ins and the shortcuts.
+fn cache_key(lang: crate::i18n::Lang) -> (&'static str, u64, u64) {
+    (lang.code(), menus::plugin_revision(), crate::shortcut_editor::GENERATION.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 fn entries(ctx: &egui::Context, lang: crate::i18n::Lang) -> Arc<Vec<Entry>> {
     type Cached = ((&'static str, u64, u64), Arc<Vec<Entry>>);
-    let shortcuts = crate::shortcut_editor::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
-    let key = (lang.code(), menus::plugin_revision(), shortcuts);
+    let key = cache_key(lang);
     let id = egui::Id::new("palette-entries");
     if let Some((k, v)) = ctx.data(|d| d.get_temp::<Cached>(id))
         && k == key
@@ -121,8 +125,16 @@ mod tests {
     fn entries_are_built_once_per_language_and_match_english_shown_text_and_ids() {
         let ctx = egui::Context::default();
         let zh = Lang::from_code("zh-hant").unwrap();
-        let en = entries(&ctx, Lang::EN);
-        assert!(Arc::ptr_eq(&en, &entries(&ctx, Lang::EN)), "kept while the language stays");
+        // Tests running alongside edit shortcuts and install plug-ins, which rebuilds the entries:
+        // look twice until nothing changed in between.
+        let (en, again) = (0..100)
+            .find_map(|_| {
+                let key = cache_key(Lang::EN);
+                let pair = (entries(&ctx, Lang::EN), entries(&ctx, Lang::EN));
+                (cache_key(Lang::EN) == key).then_some(pair)
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&en, &again), "kept while the language stays");
         let zh_entries = entries(&ctx, zh);
         assert!(!Arc::ptr_eq(&en, &zh_entries), "rebuilt for another language");
         // Editing a shortcut rebuilds them, so the palette shows the new one.
@@ -134,5 +146,28 @@ mod tests {
         for word in ["group", crate::i18n::tr(zh, "Group"), "object.group"] {
             assert!(group.haystack.contains(&word.to_lowercase()), "{word}");
         }
+    }
+
+    /// The palette lists `select.key` once, as Cancel Key Object (#541): a pick runs it with no id,
+    /// which cancels the key object. `engine.commands` gives agents the same label.
+    #[test]
+    fn the_palette_lists_cancel_key_object_once() {
+        let items = items();
+        let ids: Vec<&str> = items.iter().filter(|(label, ..)| label == "Cancel Key Object").map(|(_, id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["select.key"]);
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), crate::Services::default());
+        let commands = crate::control::all_commands(&app);
+        let key = commands.as_array().unwrap().iter().find(|c| c["id"] == "select.key").unwrap();
+        assert_eq!(key["label"], "Cancel Key Object");
+        app.run("file.new", json!({"width": 200, "height": 200})).unwrap();
+        let a = app.run("shape.rectangle", json!({"x": 10, "y": 10, "width": 10, "height": 10})).unwrap()["id"].clone();
+        let b = app.run("shape.rectangle", json!({"x": 80, "y": 50, "width": 30, "height": 30})).unwrap()["id"].clone();
+        app.run("select.set", json!({"ids": [a, b]})).unwrap();
+        app.run("select.key", json!({"id": b})).unwrap();
+        assert!(app.session.active().unwrap().selection.key.is_some());
+        // Run a pick the way `show` runs it.
+        menus::invoke(&mut app, ids[0], json!({}));
+        let st = app.session.active().unwrap();
+        assert_eq!((st.selection.len(), st.selection.key), (2, None), "both objects stay selected, without a key");
     }
 }

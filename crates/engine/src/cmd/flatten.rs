@@ -655,7 +655,7 @@ impl FlattenReport {
         art.iter_mut().for_each(opaque);
         for path in areas {
             let mut n = shape_node(&mut tmp, path.clone(), None);
-            n.appearance = Appearance::basic(Paint::solid(Color::rgb(0.0, 0.0, 0.0)), Paint::None, 0.0);
+            n.appearance = Appearance::basic(Paint::solid(Color::rgb(0.0, 0.0, 0.0)), Paint::None, 0.0).into();
             art.push(n);
         }
         Some(isolated_doc(&tmp, art))
@@ -1054,7 +1054,8 @@ fn apply(d: &mut Document, sel: &mut vectorcraft_doc::Selection, plan: Plan, o: 
             n.appearance = Appearance {
                 items: vec![AppearanceItem::Fill(FillLayer { overprint: fill.overprint, ..FillLayer::new(fill.paint) })],
                 ..Appearance::default()
-            };
+            }
+            .into();
             n.opacity = fill.alpha.min(1.0);
             children.push(Arc::new(n));
             vector += 1;
@@ -1092,7 +1093,7 @@ fn raster_node(d: &mut Document, r: Raster) -> Node {
     d.images.insert(key.clone(), ImageBlob::new("image/png", r.png));
     let image = Node::new(
         d.alloc_id(),
-        NodeKind::Image(ImageObject { key, width: r.width, height: r.height, xf: r.xf, link: None, placement: Default::default() }),
+        NodeKind::Image(Box::new(ImageObject { key, width: r.width, height: r.height, xf: r.xf, link: None, placement: Default::default() })),
     );
     let Some(path) = r.clip else { return image };
     super::rasterfx::clip_group(d, path, FillRule::NonZero, image)
@@ -1185,6 +1186,8 @@ impl Scratch {
                 let art = self.doc.symbols.iter().find(|s| &s.name == symbol).map(|s| vectorcraft_render::instance_art(&s.art, n));
                 art.and_then(|a| effects::outline_art(n, Some(&a))).map(|g| carry(n, g))
             }
+            // A placed document stays one: its art's resources aren't the document's.
+            NodeKind::PlacedDocument(_) => None,
             NodeKind::Blend { .. } | NodeKind::Envelope { .. } | NodeKind::Repeat(_) => {
                 let hook: &dyn Fn(&Node) -> Option<Node> = &effects::outline_text;
                 Some(carry(n, vectorcraft_doc::live::expanded_group(n, Some(hook))))
@@ -1221,7 +1224,7 @@ fn carry(from: &Node, mut to: Node) -> Node {
     to.blend = from.blend;
     to.isolate = from.isolate;
     to.knockout_shape = from.knockout_shape;
-    to.mask = from.mask.clone();
+    to.extras_mut().mask = from.extras().mask.clone();
     to.appearance.effects = from.appearance.effects.clone();
     to
 }
@@ -1255,7 +1258,7 @@ fn has_effects(n: &Node) -> bool {
 }
 
 fn masked(n: &Node) -> bool {
-    n.mask.as_ref().is_some_and(|m| !m.disabled)
+    n.extras().mask.as_ref().is_some_and(|m| !m.disabled)
 }
 
 /// Where `n` can paint: its visual bounds grown by its effects (and a margin for antialiasing).
@@ -1263,11 +1266,11 @@ fn reach(n: &Node) -> Option<Rect> {
     if !n.visible {
         return None;
     }
-    let fx = n.appearance.items.iter().map(|i| effects::outset(i.effects())).fold(effects::outset(&n.appearance.effects), f64::max);
     let b = match n.children() {
         Some(ch) if !n.clips() && !matches!(n.kind, NodeKind::Compound { .. }) => ch.iter().filter_map(|c| reach(c)).reduce(|a, b| a.union(b))?,
         _ => n.visual_bounds()?,
     };
+    let fx = n.appearance.items.iter().map(|i| effects::outset(i.effects(), b)).fold(effects::outset(&n.appearance.effects, b), f64::max);
     Some(b.inflate(fx + 1.0, fx + 1.0))
 }
 

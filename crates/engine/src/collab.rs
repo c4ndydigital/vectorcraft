@@ -33,6 +33,8 @@ pub enum CollabError {
 pub struct CrdtShape {
     pub node: Node,
     pub parent_id: Option<u64>,
+    #[serde(default)]
+    pub index: usize,
 }
 
 /// CRDT bridge synchronizing a [`Session`]'s active [`Document`] with a [`yrs::Doc`].
@@ -105,8 +107,11 @@ impl CollabBridge {
             if matches!(node.kind, NodeKind::Path { .. } | NodeKind::Compound { .. } | NodeKind::Image(_)) {
                 let key = node.id.0.to_string();
                 active_shape_ids.insert(key.clone());
-                let parent_id = st.doc.parent_of(node.id).map(|p| p.0);
-                shapes_to_sync.push((key, CrdtShape { node: node.clone(), parent_id }));
+                let (parent_id, index) = match st.doc.position(node.id) {
+                    Some((p, idx, _)) => (p.map(|pid| pid.0), idx),
+                    None => (st.doc.parent_of(node.id).map(|p| p.0), usize::MAX),
+                };
+                shapes_to_sync.push((key, CrdtShape { node: node.clone(), parent_id, index }));
             }
         });
 
@@ -191,34 +196,34 @@ impl CollabBridge {
             }
         }
 
+        // Sort incoming shapes by their index so they are inserted/moved in correct Z-order
+        crdt_shapes.sort_by_key(|s| s.index);
+
         // Insert new nodes or update existing nodes in-place
         for shape in crdt_shapes {
             let node_id = shape.node.id;
+            let target_parent = shape
+                .parent_id
+                .map(NodeId)
+                .filter(|&pid| doc.node(pid).is_some_and(|n| n.is_layer() || matches!(n.kind, NodeKind::Group { .. })))
+                .or_else(|| doc.default_layer());
+
             if let Some(existing) = doc.node_mut(node_id) {
                 *existing = shape.node;
-                let current_parent = doc.parent_of(node_id).map(|p| p.0);
-                if current_parent != shape.parent_id {
-                    let target_parent = shape
-                        .parent_id
-                        .map(NodeId)
-                        .filter(|&pid| doc.node(pid).is_some_and(|n| n.is_layer() || matches!(n.kind, NodeKind::Group { .. })))
-                        .or_else(|| doc.default_layer());
-                    let _ = doc.move_node(node_id, target_parent, usize::MAX);
+                let (current_parent, current_idx) = match doc.position(node_id) {
+                    Some((p, idx, _)) => (p, idx),
+                    None => (doc.parent_of(node_id), usize::MAX),
+                };
+                if current_parent != target_parent || current_idx != shape.index {
+                    let _ = doc.move_node(node_id, target_parent, shape.index);
                 }
             } else {
-                let parent = shape
-                    .parent_id
-                    .map(NodeId)
-                    .filter(|&pid| doc.node(pid).is_some_and(|n| n.is_layer() || matches!(n.kind, NodeKind::Group { .. })))
-                    .or_else(|| doc.default_layer())
-                    .or_else(|| doc.layers.first().map(|l| l.id));
-
-                let parent_layer = match parent {
+                let parent_layer = match target_parent {
                     Some(p) => Some(p),
                     None => Some(doc.add_layer(None)),
                 };
 
-                doc.insert(parent_layer, usize::MAX, shape.node)?;
+                doc.insert(parent_layer, shape.index, shape.node)?;
             }
         }
 

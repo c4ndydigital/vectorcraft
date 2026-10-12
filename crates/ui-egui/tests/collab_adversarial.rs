@@ -3,8 +3,8 @@
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use vectorcraft_doc::NodeKind;
-use vectorcraft_engine::collab::CollabBridge;
 use vectorcraft_engine::Session;
+use vectorcraft_engine::collab::CollabBridge;
 use vectorcraft_geom::Point;
 use vectorcraft_ui_egui::{CollabIncoming, CollabOutgoing, Services, VectorcraftApp};
 
@@ -16,16 +16,8 @@ fn test_adversarial_echo_loop_prevention() {
     let inbox_b = Arc::new(Mutex::new(Vec::new()));
     let outbox_b = Arc::new(Mutex::new(Vec::new()));
 
-    let services_a = Services {
-        collab_inbox: Some(inbox_a.clone()),
-        collab_outbox: Some(outbox_a.clone()),
-        ..Default::default()
-    };
-    let services_b = Services {
-        collab_inbox: Some(inbox_b.clone()),
-        collab_outbox: Some(outbox_b.clone()),
-        ..Default::default()
-    };
+    let services_a = Services { collab_inbox: Some(inbox_a.clone()), collab_outbox: Some(outbox_a.clone()), ..Default::default() };
+    let services_b = Services { collab_inbox: Some(inbox_b.clone()), collab_outbox: Some(outbox_b.clone()), ..Default::default() };
 
     let mut app_a = VectorcraftApp::new(Session::new(), services_a);
     let mut app_b = VectorcraftApp::new(Session::new(), services_b);
@@ -96,11 +88,7 @@ fn test_adversarial_cursor_throttling_30hz() {
     let inbox = Arc::new(Mutex::new(Vec::new()));
     let outbox = Arc::new(Mutex::new(Vec::new()));
 
-    let services = Services {
-        collab_inbox: Some(inbox),
-        collab_outbox: Some(outbox.clone()),
-        ..Default::default()
-    };
+    let services = Services { collab_inbox: Some(inbox), collab_outbox: Some(outbox.clone()), ..Default::default() };
 
     let mut app = VectorcraftApp::new(Session::new(), services);
     let ctx = egui::Context::default();
@@ -139,10 +127,7 @@ fn test_adversarial_cursor_throttling_30hz() {
     // Verify time gap between every consecutive broadcast is >= 0.033s (33ms)
     for w in broadcast_times.windows(2) {
         let dt = w[1] - w[0];
-        assert!(
-            dt >= 0.033 - 1e-6,
-            "Interval between broadcasts must be >= 0.033s, found dt = {dt}"
-        );
+        assert!(dt >= 0.033 - 1e-6, "Interval between broadcasts must be >= 0.033s, found dt = {dt}");
     }
 
     // Heartbeat test: keep cursor stationary for 3 seconds
@@ -158,10 +143,7 @@ fn test_adversarial_cursor_throttling_30hz() {
         }
     }
     // Over 3 seconds with static cursor, heartbeat triggers when dt >= 1.0 (approx 3 times)
-    assert!(
-        (2..=4).contains(&heartbeat_count),
-        "Heartbeat broadcast over 3s should be ~3, got {heartbeat_count}"
-    );
+    assert!((2..=4).contains(&heartbeat_count), "Heartbeat broadcast over 3s should be ~3, got {heartbeat_count}");
 
     // Cursor departure: cursor leaves canvas
     app.hover_doc = None;
@@ -179,10 +161,7 @@ fn test_adversarial_cursor_throttling_30hz() {
         let now = 15.0 + (step as f64) * 0.5;
         app.handle_collab(&ctx, now);
     }
-    assert!(
-        outbox.lock().unwrap().is_empty(),
-        "No broadcasts while cursor remains None"
-    );
+    assert!(outbox.lock().unwrap().is_empty(), "No broadcasts while cursor remains None");
 }
 
 /// 3. EMPIRICAL TEST: Verify two-way synchronization, new Arc<Document>, and revision bumping.
@@ -202,9 +181,7 @@ fn test_adversarial_twoway_sync_arc_document_revision() {
     let initial_rev_b = session_b.active().unwrap().revision;
 
     // 1. Peer A adds a shape locally
-    let rect_res = session_a
-        .execute("shape.rectangle", &json!({"x": 50.0, "y": 75.0, "width": 120.0, "height": 90.0}))
-        .unwrap();
+    let rect_res = session_a.execute("shape.rectangle", &json!({"x": 50.0, "y": 75.0, "width": 120.0, "height": 90.0})).unwrap();
     let rect_id = rect_res["id"].as_u64().unwrap();
 
     // Export update from A
@@ -216,17 +193,11 @@ fn test_adversarial_twoway_sync_arc_document_revision() {
 
     // Assert that Remote (B) has a NEW Arc<Document>
     let current_arc_b = Arc::clone(&session_b.active().unwrap().doc);
-    assert!(
-        !Arc::ptr_eq(&initial_arc_b, &current_arc_b),
-        "Applying remote update must produce a new Arc<Document> pointer"
-    );
+    assert!(!Arc::ptr_eq(&initial_arc_b, &current_arc_b), "Applying remote update must produce a new Arc<Document> pointer");
 
     // Assert that revision was bumped
     let current_rev_b = session_b.active().unwrap().revision;
-    assert!(
-        current_rev_b > initial_rev_b,
-        "Applying remote update must bump revision: initial={initial_rev_b}, current={current_rev_b}"
-    );
+    assert!(current_rev_b > initial_rev_b, "Applying remote update must bump revision: initial={initial_rev_b}, current={current_rev_b}");
 
     // Assert that the shape exists in B with matching geometry
     let node_in_b = session_b.active().unwrap().doc.node(vectorcraft_doc::NodeId(rect_id)).expect("shape in B");
@@ -236,9 +207,7 @@ fn test_adversarial_twoway_sync_arc_document_revision() {
     let initial_arc_a = Arc::clone(&session_a.active().unwrap().doc);
     let initial_rev_a = session_a.active().unwrap().revision;
 
-    session_b
-        .execute("paint.setFill", &json!({"ids": [rect_id], "color": "#00ff88"}))
-        .unwrap();
+    session_b.execute("paint.setFill", &json!({"ids": [rect_id], "color": "#00ff88"})).unwrap();
 
     let update_b = bridge_b.sync_from_session(&session_b).expect("sync from B");
     assert!(!update_b.is_empty(), "Peer B modification produces CRDT update");
@@ -247,14 +216,8 @@ fn test_adversarial_twoway_sync_arc_document_revision() {
 
     // Assert Peer A also gets a NEW Arc<Document> and bumped revision
     let current_arc_a = Arc::clone(&session_a.active().unwrap().doc);
-    assert!(
-        !Arc::ptr_eq(&initial_arc_a, &current_arc_a),
-        "Applying reverse remote update must produce a new Arc<Document> on Peer A"
-    );
-    assert!(
-        session_a.active().unwrap().revision > initial_rev_a,
-        "Revision on Peer A must be bumped"
-    );
+    assert!(!Arc::ptr_eq(&initial_arc_a, &current_arc_a), "Applying reverse remote update must produce a new Arc<Document> on Peer A");
+    assert!(session_a.active().unwrap().revision > initial_rev_a, "Revision on Peer A must be bumped");
 
     // Check color converged on Peer A
     let node_in_a = session_a.active().unwrap().doc.node(vectorcraft_doc::NodeId(rect_id)).expect("shape in A");

@@ -205,6 +205,7 @@ impl Session {
             slices_locked: self.menu.slices_locked,
             auto_add_delete: !self.prefs.disable_auto_add_delete,
             selection_tolerance: self.prefs.selection_tolerance,
+            anchor_size: self.prefs.anchor_size,
             path_only: self.prefs.object_selection_by_path_only,
             type_path_only: self.prefs.type_selection_by_path_only,
             double_click_isolate: self.prefs.double_click_to_isolate,
@@ -222,6 +223,7 @@ impl Session {
             anchor_path_labels: self.prefs.anchor_path_labels,
             measurement_labels: self.prefs.measurement_labels,
             transform_tools_guides: self.prefs.transform_tools_guides,
+            spacing_guides: self.prefs.spacing_guides,
             snapping_tolerance: self.prefs.snapping_tolerance,
             construction_angles: if self.prefs.construction_guides {
                 vectorcraft_tools::guides::construction_angles(&self.prefs.construction_angles)
@@ -354,6 +356,11 @@ impl Session {
 
     pub fn tool_busy(&self) -> bool {
         self.tool.busy()
+    }
+
+    /// Is the active tool moving, scaling or rotating the selection with a drag?
+    pub fn tool_transforming(&self) -> bool {
+        self.tool.transforming()
     }
 
     /// Does the active tool take `key` ahead of the shortcuts bound to it (see `Tool::claims_key`)?

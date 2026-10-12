@@ -1,9 +1,10 @@
 //! Paragraph panel: seven alignment buttons, Paragraph Direction (with the Indic options), indents,
-//! space before/after, Hyphenate and Mojikumi Set (with the East Asian options).
+//! space before/after, Hyphenate, Mojikumi Set and Kinsoku Set (with the East Asian options); the panel menu
+//! picks the Single-line or Every-line Composer.
 
 use egui::{Ui, vec2};
 use serde_json::{Value, json};
-use vectorcraft_doc::{Justify, NodeKind, ParaDirection, ParaStyle};
+use vectorcraft_doc::{Composer, Justify, NodeKind, ParaDirection, ParaStyle};
 
 use super::character::text_style;
 use super::{pstate, set_pstate};
@@ -21,15 +22,36 @@ pub const ALIGNMENTS: [(Justify, &str, &str, &str); 7] = [
     (Justify::JustifyAll, "dc-para-justify-all", "Justify all lines", "justifyAll"),
 ];
 
-/// Paragraph attributes apply to the whole text object (ending a Type tool typing session first).
+/// Paragraph attributes apply to the selected text objects' paragraphs or, while the Type tool
+/// edits text, to the paragraphs its selection (or caret) touches (ending its typing session).
 fn format(app: &mut VectorcraftApp, p: Value) {
     para_cmd(app, "text.setFormat", p);
 }
 
+/// The alignment shortcuts' commands (Cmd+Shift+L, C, R, J and F, as in page layout apps) and the
+/// `justify` each sets ([`align`]).
+pub const ALIGN_COMMANDS: [(&str, &str); 5] = [
+    ("type.alignLeft", "left"),
+    ("type.alignCenter", "center"),
+    ("type.alignRight", "right"),
+    ("type.justifyLeft", "justifyLeft"),
+    ("type.justifyAll", "justifyAll"),
+];
+
+/// Align the paragraphs of the selected type, or those the Type tool's selection touches, as
+/// `justify` (an [`ALIGN_COMMANDS`] alignment, #1111).
+pub(crate) fn align(app: &mut VectorcraftApp, justify: &str) -> Result<Value, String> {
+    text_style(app).ok_or("select some type first")?;
+    para_cmd(app, "text.setStyle", json!({ "justify": justify }));
+    Ok(Value::Null)
+}
+
 fn para_cmd(app: &mut VectorcraftApp, cmd: &str, mut p: Value) {
-    if let Some((id, _, _)) = super::character::text_editing(app) {
+    if let Some((id, a, b)) = super::character::text_editing(app) {
         super::character::end_typing(app);
         p["ids"] = json!([id.0]);
+        p["start"] = json!(a);
+        p["end"] = json!(b);
     }
     app.run(cmd, p).ok();
 }
@@ -38,9 +60,11 @@ fn para_cmd(app: &mut VectorcraftApp, cmd: &str, mut p: Value) {
 /// right to left: its Paragraph Direction, else from its first strong character?
 fn resolved_rtl(app: &VectorcraftApp, para: &ParaStyle) -> bool {
     let editing = super::character::text_editing(app);
-    let selected = super::first_selected(app);
-    let node = editing.and_then(|(id, _, _)| app.session.active().and_then(|d| d.doc.node(id))).or(selected.as_ref());
-    let Some(NodeKind::Text(t)) = node.map(|n| &n.kind) else { return para.direction == Some(ParaDirection::RightToLeft) };
+    let text = editing.and_then(|(id, _, _)| match app.session.active().and_then(|d| d.doc.node(id)).map(|n| &n.kind) {
+        Some(NodeKind::Text(t)) => Some(t.as_ref()),
+        _ => None,
+    });
+    let Some(t) = text.or_else(|| super::character::first_selected_text(app)) else { return para.direction == Some(ParaDirection::RightToLeft) };
     let plain = t.plain_text();
     let paragraph = vectorcraft_text::edit::paragraph_at(&plain, editing.map_or(0, |(_, a, _)| a));
     vectorcraft_text::paragraph_is_rtl(plain.get(paragraph).unwrap_or_default(), para.direction)
@@ -56,6 +80,24 @@ fn shown_alignment(justify: Justify, rtl: bool) -> Justify {
     }
 }
 
+/// The seven alignment buttons, `size` points square, the one of `para`'s alignment on (the
+/// Paragraph panel's and the Properties panel's).
+pub fn alignment_buttons(app: &mut VectorcraftApp, ui: &mut Ui, para: &ParaStyle, size: f32) {
+    let shown = shown_alignment(para.justify, resolved_rtl(app, para));
+    for (j, icon, tip, id) in ALIGNMENTS {
+        if widgets::icon_button(ui, icon, tip, shown == j, size).clicked() {
+            para_cmd(app, "text.setStyle", json!({"justify": id}));
+        }
+    }
+}
+
+/// The Hyphenate checkbox of `para`'s paragraphs.
+pub fn hyphenate_check(app: &mut VectorcraftApp, ui: &mut Ui, para: &ParaStyle) {
+    if widgets::check(ui, tl!("Hyphenate"), para.hyphenate, true) {
+        format(app, json!({"hyphenate": !para.hyphenate}));
+    }
+}
+
 pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let Some((_, para)) = text_style(app) else {
@@ -63,14 +105,9 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         return;
     };
     let rtl = resolved_rtl(app, &para);
-    let shown = shown_alignment(para.justify, rtl);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        for (j, icon, tip, id) in ALIGNMENTS {
-            if widgets::icon_button(ui, icon, tip, shown == j, 28.0).clicked() {
-                para_cmd(app, "text.setStyle", json!({"justify": id}));
-            }
-        }
+        alignment_buttons(app, ui, &para, 28.0);
         // Paragraph direction, with the Middle Eastern (Indic) options.
         if app.session.prefs.show_indic_options {
             ui.add_space(6.0);
@@ -123,9 +160,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     if pstate::<bool>(ui.ctx(), "pa-hide-options") {
         return;
     }
-    if widgets::check(ui, tl!("Hyphenate"), para.hyphenate, true) {
-        format(app, json!({"hyphenate": !para.hyphenate}));
-    }
+    hyphenate_check(app, ui, &para);
     // Japanese composition: how punctuation is spaced (JLREQ 3.1), with the East Asian options.
     if app.session.prefs.show_east_asian_options {
         ui.horizontal(|ui| {
@@ -135,6 +170,20 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             // Already translated: shown as they are.
             if let Some(i) = widgets::dropdown_names(ui, "pa-mojikumi", current, &sets, ui.available_width() - 4.0) {
                 format(app, json!({"mojikumi": if i == 1 { "lineEndHalf" } else { "none" }}));
+            }
+        });
+        // Which characters may not start or end a line.
+        ui.horizontal(|ui| {
+            use vectorcraft_doc::Kinsoku;
+            widgets::dim_label(ui, tl!("Kinsoku Set"));
+            let sets = [(tl!("None"), Kinsoku::None, "none"), (tl!("Hard"), Kinsoku::Hard, "hard"), (tl!("Soft"), Kinsoku::Soft, "soft")];
+            let names = sets.map(|s| s.0);
+            let current = sets.iter().find(|s| s.1 == para.kinsoku).map_or(names[1], |s| s.0);
+            // Already translated: shown as they are.
+            if let Some(i) = widgets::dropdown_names(ui, "pa-kinsoku", current, &names, ui.available_width() - 4.0)
+                && let Some((_, _, key)) = sets.get(i)
+            {
+                format(app, json!({"kinsoku": key}));
             }
         });
     }
@@ -181,14 +230,20 @@ pub fn menu(app: &mut VectorcraftApp, ui: &mut Ui) {
         });
     }
     ui.separator();
-    menu_item(ui, tl!("Single-line Composer"), false, false);
-    menu_item(ui, tl!("Every-line Composer"), false, true);
+    let composer = style.as_ref().map(|(_, p)| p.composer);
+    for (c, label, id) in
+        [(Composer::SingleLine, tl!("Single-line Composer"), "singleLine"), (Composer::EveryLine, tl!("Every-line Composer"), "everyLine")]
+    {
+        if menu_item(ui, label, has, composer == Some(c)) {
+            format(app, json!({ "composer": id }));
+        }
+    }
     ui.separator();
     if menu_item(ui, tl!("Reset Panel"), has, false) {
         para_cmd(app, "text.setStyle", json!({"justify": "auto"}));
         format(
             app,
-            json!({"leftIndent": 0, "rightIndent": 0, "firstLineIndent": 0, "spaceBefore": 0, "spaceAfter": 0, "hyphenate": false, "direction": "auto", "leadingModel": "romanBaseline", "burasagari": "standard"}),
+            json!({"leftIndent": 0, "rightIndent": 0, "firstLineIndent": 0, "spaceBefore": 0, "spaceAfter": 0, "hyphenate": false, "direction": "auto", "leadingModel": "romanBaseline", "burasagari": "standard", "kinsoku": "hard", "composer": "everyLine"}),
         );
     }
 }
@@ -211,6 +266,8 @@ mod tests {
             shown_alignment(para.justify, resolved_rtl(app, &para))
         };
         assert_eq!(shown(&app), Justify::Right);
+        app.session.execute("object.group", &json!({})).unwrap();
+        assert_eq!(shown(&app), Justify::Right, "group controls resolve the same text descendant's direction");
         app.session.execute("text.setStyle", &json!({"justify": "left"})).unwrap();
         assert_eq!(shown(&app), Justify::Left);
         app.session.execute("text.setStyle", &json!({"justify": "auto"})).unwrap();

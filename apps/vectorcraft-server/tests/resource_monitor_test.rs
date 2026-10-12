@@ -1,8 +1,5 @@
 use std::time::{Duration, Instant};
-use vectorcraft_server::{
-    check_bearer_auth, html_escape, AlertEvaluator, AlertEvent, AuthResult, LegalConfig,
-    ResourceMetrics, UmamiConfig,
-};
+use vectorcraft_server::{AlertEvaluator, AlertEvent, AuthResult, LegalConfig, ResourceMetrics, UmamiConfig, check_bearer_auth, html_escape};
 
 #[test]
 fn test_threshold_state_machine_and_recovery() {
@@ -84,10 +81,7 @@ fn test_bearer_token_authorization() {
 
 #[test]
 fn test_html_escape_special_characters() {
-    assert_eq!(
-        html_escape("<script>\"'hello & world'\"</script>"),
-        "&lt;script&gt;&quot;&#39;hello &amp; world&#39;&quot;&lt;/script&gt;"
-    );
+    assert_eq!(html_escape("<script>\"'hello & world'\"</script>"), "&lt;script&gt;&quot;&#39;hello &amp; world&#39;&quot;&lt;/script&gt;");
 }
 
 #[test]
@@ -103,9 +97,7 @@ fn test_legal_and_umami_placeholders() {
     };
     assert!(cfg.is_configured());
 
-    let umami = UmamiConfig {
-        script_url: "https://example.com/umami.js".to_string(),
-        website_id: "00000000-0000-0000-0000-000000000000".to_string(),
-    };
+    let umami =
+        UmamiConfig { script_url: "https://example.com/umami.js".to_string(), website_id: "00000000-0000-0000-0000-000000000000".to_string() };
     assert_eq!(umami.script_url, "https://example.com/umami.js");
 }

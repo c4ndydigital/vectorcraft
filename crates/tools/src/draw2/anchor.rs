@@ -4,7 +4,7 @@
 //! Delete: click an anchor to remove it, re-fitting the neighbouring curve (Alt = add).
 //! Anchor Point: click a smooth anchor → corner; drag an anchor → pull out smooth handles; drag a
 //! handle → move it independently (Shift: at 45° steps round its anchor); drag a segment → reshape
-//! the curve.
+//! the curve, a selected blend's spine's too, straight or curved (#1111).
 //! Scissors: click a path to split it there.
 
 use serde_json::json;
@@ -19,9 +19,30 @@ use crate::{Action, Cursor, Mods, Overlay, PointerEvent, PointerKind, Tool, Tool
 #[derive(Clone, Copy, Debug)]
 enum State {
     Idle,
-    Convert { id: NodeId, si: usize, ai: usize, start: Point, began: bool },
-    Handle { id: NodeId, si: usize, ai: usize, out: bool, began: bool },
-    Reshape { id: NodeId, si: usize, seg: usize, t: f64, start: Point, began: bool },
+    Convert {
+        id: NodeId,
+        si: usize,
+        ai: usize,
+        start: Point,
+        began: bool,
+    },
+    Handle {
+        id: NodeId,
+        si: usize,
+        ai: usize,
+        out: bool,
+        began: bool,
+    },
+    /// Bending a segment: a path's, or (`spine`) a selected blend's spine's.
+    Reshape {
+        id: NodeId,
+        si: usize,
+        seg: usize,
+        t: f64,
+        start: Point,
+        began: bool,
+        spine: bool,
+    },
 }
 
 pub struct AnchorTool {
@@ -48,7 +69,7 @@ impl AnchorTool {
     }
 
     fn delete(cx: &ToolContext, p: Point) -> Vec<Action> {
-        hit_anchor(cx, p, cx.pick_tol()).map(remove_anchor).into_iter().collect()
+        hit_anchor(cx, p, cx.point_tol()).map(remove_anchor).into_iter().collect()
     }
 }
 
@@ -61,7 +82,8 @@ impl Tool for AnchorTool {
     }
     fn pointer(&mut self, cx: &ToolContext, ev: &PointerEvent) -> Vec<Action> {
         let p = ev.pos;
-        let tol = cx.pick_tol();
+        // Anchors and handle ends are picked from a little further than segments.
+        let (tol, point) = (cx.pick_tol(), cx.point_tol());
         match (self.id, ev.kind) {
             ("addAnchor", PointerKind::Down) => {
                 if ev.mods.alt {
@@ -78,7 +100,7 @@ impl Tool for AnchorTool {
                 }
             }
             ("scissors", PointerKind::Down) => {
-                if let Some((id, si, ai)) = hit_anchor(cx, p, tol) {
+                if let Some((id, si, ai)) = hit_anchor(cx, p, point) {
                     return vec![Action::Exec("path.split".into(), json!({"id": id.0, "subpath": si, "anchor": ai}))];
                 }
                 match hit_segment(cx, p, tol) {
@@ -87,13 +109,15 @@ impl Tool for AnchorTool {
                 }
             }
             ("anchorPoint", PointerKind::Down) => {
-                if let Some((id, si, ai, out)) = hit_handle(cx, p, tol) {
+                if let Some((id, si, ai, out)) = hit_handle(cx, p, point) {
                     self.state = State::Handle { id, si, ai, out, began: false };
                     self.snap = HandleSnap::default();
-                } else if let Some((id, si, ai)) = hit_anchor(cx, p, tol) {
+                } else if let Some((id, si, ai)) = hit_anchor(cx, p, point) {
                     self.state = State::Convert { id, si, ai, start: p, began: false };
                 } else if let Some((id, si, seg, t)) = hit_segment(cx, p, tol) {
-                    self.state = State::Reshape { id, si, seg, t, start: p, began: false };
+                    self.state = State::Reshape { id, si, seg, t, start: p, began: false, spine: false };
+                } else if let Some((id, seg, t, _)) = crate::direct::hit_spine_segment(cx, p, tol) {
+                    self.state = State::Reshape { id, si: 0, seg, t, start: p, began: false, spine: true };
                 }
                 vec![]
             }
@@ -127,6 +151,10 @@ impl Tool for AnchorTool {
                             json!({"id": id.0, "subpath": si, "anchor": ai, "which": if out { "out" } else { "in" }, "x": q.x, "y": q.y, "independent": true}),
                         )
                     }
+                    State::Reshape { id, seg, t, start, spine: true, .. } => Action::Preview(
+                        "object.blend.spine.reshapeSegment".into(),
+                        json!({"id": id.0, "segment": seg, "t": t, "dx": p.x - start.x, "dy": p.y - start.y}),
+                    ),
                     State::Reshape { id, si, seg, t, start, .. } => Action::Preview(
                         "path.reshapeSegment".into(),
                         json!({"id": id.0, "subpath": si, "segment": seg, "t": t, "dx": p.x - start.x, "dy": p.y - start.y}),

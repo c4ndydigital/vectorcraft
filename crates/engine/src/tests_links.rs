@@ -64,7 +64,7 @@ pub(crate) fn place(s: &mut Session, path: &str) -> NodeId {
 
 pub(crate) fn image(s: &Session, id: NodeId) -> ImageObject {
     match &s.doc().unwrap().doc.node(id).unwrap().kind {
-        NodeKind::Image(im) => im.clone(),
+        NodeKind::Image(im) => (**im).clone(),
         k => panic!("not an image: {k:?}"),
     }
 }
@@ -125,6 +125,36 @@ fn a_placed_link_records_the_file_and_the_document_saves_only_a_preview() {
     save(&mut s, &doc_path);
     let saved: Value = serde_json::from_slice(&std::fs::read(&doc_path).unwrap()).unwrap();
     assert_eq!(saved["images"][&im.key]["proxy"], Value::Null, "an embedded image shows it too");
+}
+
+/// A flat `w`×`h` Photoshop document of one colour (raw RGB, no layers).
+fn psd(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
+    let mut f = b"8BPS\0\x01\0\0\0\0\0\0\0\x03".to_vec();
+    f.extend(h.to_be_bytes());
+    f.extend(w.to_be_bytes());
+    f.extend([0, 8, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    for v in rgb {
+        f.extend(std::iter::repeat_n(v, (w * h) as usize));
+    }
+    f
+}
+
+/// #918: a Photoshop document placed linked shows its merged image, and updates when it changes.
+#[test]
+fn a_linked_photoshop_document_places_and_updates() {
+    let dir = Folder::new("psd");
+    let pic = dir.file("art/photo.psd");
+    write(&pic, &psd(600, 300, RED));
+    let mut s = session();
+    let id = place(&mut s, &pic);
+    let link = image(&s, id).link.unwrap();
+    assert_eq!(link.path, pic);
+    assert!(near(centre_colour(&s.doc().unwrap().doc), RED));
+    write(&pic, &psd(400, 400, BLUE));
+    assert_eq!(s.execute("links.update", &json!({})).unwrap(), json!({"updated": [id.0], "missing": []}));
+    let im = image(&s, id);
+    assert_eq!((im.width, im.height), (400, 400));
+    assert!(near(centre_colour(&s.doc().unwrap().doc), BLUE));
 }
 
 #[test]
@@ -293,7 +323,7 @@ fn relative_paths_are_written_against_the_saved_file() {
         link: Some(LinkInfo::new(format!("{root}{sep}art{sep}a.png"))),
         placement: Default::default(),
     };
-    d.insert(Some(lid), 0, vectorcraft_doc::Node::new(nid, NodeKind::Image(im))).unwrap();
+    d.insert(Some(lid), 0, vectorcraft_doc::Node::new(nid, NodeKind::Image(Box::new(im)))).unwrap();
     let rel = |dest: String| {
         let d = cmd::links::with_relative_paths(&d, &dest).unwrap_or_else(|| d.clone());
         match &d.node(nid).unwrap().kind {
@@ -320,11 +350,49 @@ fn a_placed_document_brings_its_links_with_the_files_pixels() {
     let doc_path = dir.file("part.vectorcraft");
     save(&mut s, &doc_path);
     let mut s = session();
-    s.execute("file.place", &json!({"path": doc_path})).unwrap();
+    // As an editable copy (placed linked, it stays one locked object).
+    s.execute("file.place", &json!({"path": doc_path, "link": false})).unwrap();
     let doc = &s.doc().unwrap().doc;
     let mut placed = vec![];
     doc.visit_images(|_, im| placed.push(im.clone()));
     let [im] = &placed[..] else { panic!("one image: {placed:?}") };
     assert_eq!(im.link.as_ref().map(|l| l.path.as_str()), Some(pic.as_str()), "still linked");
     assert!(!doc.images[&im.key].is_proxy(), "the file's pixels, not the preview");
+}
+
+/// The placed (linked) files of a `.ai` file come in with the preview the file keeps of them: one
+/// not found shows it, one found is read at once into the same bounds, which isn't a change.
+#[test]
+fn links_of_an_imported_file_are_read_where_they_are_found() {
+    use vectorcraft_testkit::ai;
+    let dir = Folder::new("imported");
+    let pic = dir.file("photo.png").replace('\\', "/");
+    // A 2×1 preview (premultiplied ARGB: a blue at half opacity) of a file of 600 × 300 px placed at
+    // 60 × 30 pt, which the PDF part draws there too.
+    let place = format!(
+        "%AI5_BeginPlace\n[0.1 0 0 -0.1 20 80] 0 0 600 300 4 4 0\n({pic})`\n%AI26_BeginPlacedObjectPreview\n2 1 8 32 17 \x7f\x10\x10\x60\x7f\x10\x10\x60\n%AI26_EndPlacedObjectPreview\n~\n%AI5_EndPlace\n"
+    );
+    let doc_path = dir.file("poster.ai");
+    write(&doc_path, &ai::ai(ai::editing_data(200.0, 100.0, &ai::layer("Art", &place)).as_bytes(), "0.56 0.56 0.87 rg 20 50 60 30 re f"));
+    let placed = |s: &Session| {
+        let mut found = vec![];
+        s.doc().unwrap().doc.visit_images(|n, im| found.push((n.geometric_bounds().unwrap(), im.clone())));
+        let [one] = &found[..] else { panic!("one image: {found:?}") };
+        one.clone()
+    };
+    let in_place = |b: Rect| [b.x0 - 20.0, b.y0 - 20.0, b.x1 - 80.0, b.y1 - 50.0].iter().all(|d| d.abs() < 1e-6);
+    let mut s = session();
+
+    let r = open(&mut s, &doc_path);
+    assert_eq!((r["missingLinks"][0]["name"].as_str(), r["missingLinks"][0]["path"].as_str()), (Some("photo.png"), Some(pic.as_str())), "{r}");
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("low-resolution preview")), "{r}");
+    let (b, im) = placed(&s);
+    assert!(in_place(b) && im.width == 2 && s.doc().unwrap().doc.images[&im.key].is_proxy(), "{b:?} {im:?}");
+
+    write(&pic, &png(600, 300, RED));
+    let r = open(&mut s, &doc_path);
+    assert_eq!((&r["missingLinks"], &r["modifiedLinks"], &r["updatedLinks"]), (&json!([]), &json!([]), &json!([])), "{r}");
+    let (b, im) = placed(&s);
+    assert!(in_place(b) && (im.width, im.height) == (600, 300) && im.link.as_ref().is_some_and(|l| l.hash.is_some()), "{b:?} {im:?}");
+    assert!(!s.doc().unwrap().doc.images[&im.key].is_proxy());
 }

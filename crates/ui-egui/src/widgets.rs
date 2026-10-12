@@ -121,6 +121,27 @@ pub fn section_header(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
 }
 
+/// A collapsible section's header across the panel: a chevron (down while `open`) and `text`;
+/// a click anywhere on it toggles the section. Whether it was clicked.
+pub fn section_toggle(ui: &mut Ui, text: &str, open: bool) -> bool {
+    section_toggle_name(ui, tl!(text), open).clicked()
+}
+
+/// [`section_toggle`] for a name that is user data (a library group), shown as it is → its
+/// response (clicked: toggle; it takes a context menu).
+pub fn section_toggle_name(ui: &mut Ui, text: &str, open: bool) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 3.0, t.hover);
+    }
+    let chevron = Rect::from_center_size(pos2(rect.left() + 8.0, rect.center().y), vec2(12.0, 12.0));
+    icons::paint(ui, if open { "chevron-down" } else { "chevron-right" }, chevron, if resp.hovered() { t.text_strong } else { t.icon });
+    ui.painter().text(pos2(rect.left() + 18.0, rect.center().y), egui::Align2::LEFT_CENTER, text, theme::semibold(12.5), t.text);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, true, open, text));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Full-width 1 px divider with vertical margins.
 pub fn divider(ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
@@ -172,37 +193,10 @@ pub(crate) fn typed_unit(ctx: &egui::Context, unit: Unit) -> Unit {
 /// without a unit is in `unit` ([`typed_unit`]: in points in a picas field with Numbers Without
 /// Units Are Points on).
 pub fn num_field(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, value: Option<f64>, unit: Unit, width: f32) -> Option<f64> {
-    let t = Tokens::get(ui.ctx());
     let id = ui.id().with(id);
     let shown = value.map(|v| unit.format(v)).unwrap_or_default();
-    let mut buf: String = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| shown.clone());
-    let editing = ui.memory(|m| m.has_focus(id));
-    if !editing {
-        buf = shown.clone();
-    }
-    take_dialog_focus(ui, id, &buf);
-    let (rect, resp) = ui
-        .allocate_ui_with_layout(vec2(width, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.set_min_width(width);
-            let framed = egui::Frame::NONE
-                .fill(t.input)
-                .stroke(Stroke::new(1.0, if editing { t.accent } else { t.input_border }))
-                .corner_radius(CornerRadius::same(2))
-                .inner_margin(egui::Margin::symmetric(6, 4))
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut buf)
-                            .id(id)
-                            .frame(egui::Frame::NONE)
-                            .desired_width(width - 14.0)
-                            .min_size(vec2(width - 14.0, 0.0))
-                            .font(egui::FontId::proportional(12.5))
-                            .text_color(t.text_strong),
-                    )
-                });
-            (framed.response.rect, framed.inner)
-        })
-        .inner;
+    take_dialog_focus(ui, id, &shown);
+    let (mut buf, resp, rect) = recessed_text(ui, id, &shown, width, 1);
     select_all_on_focus(ui, &resp, &buf);
     // ↑/↓ and the wheel step in the field's unit; a drag on its label scrubs it.
     let read = typed_unit(ui.ctx(), unit);
@@ -286,16 +280,17 @@ fn step_value(ui: &Ui, resp: &Response, buf: &mut String, read: impl Fn(&str) ->
 }
 
 /// The flag `dialogs::show` raises while it draws the body of a dialog that has just opened; the
-/// first field drawn takes it ([`take_dialog_focus`]).
+/// first enabled field drawn takes it ([`take_dialog_focus`]).
 pub(crate) fn dialog_focus_flag() -> egui::Id {
     egui::Id::new("dialog-focus-first-field")
 }
 
-/// If field `id` (showing `text`) is the first field of a dialog that has just opened, give it the
-/// keyboard focus with all of `text` selected: typing replaces the value and Enter applies it.
+/// If field `id` (showing `text`) is the first enabled field of a dialog that has just opened, give
+/// it the keyboard focus with all of `text` selected: typing replaces the value and Enter applies it.
 pub(crate) fn take_dialog_focus(ui: &Ui, id: egui::Id, text: &str) {
-    // A new window's first frame only measures its contents: nothing can take focus yet.
-    if ui.is_sizing_pass() || ui.data_mut(|d| d.remove_temp::<bool>(dialog_focus_flag())).is_none() {
+    // A new window's first frame only measures its contents: nothing can take focus yet. Nor can a
+    // greyed-out field (egui drops its focus): the flag stays for the first field that is enabled.
+    if ui.is_sizing_pass() || !ui.is_enabled() || ui.data_mut(|d| d.remove_temp::<bool>(dialog_focus_flag())).is_none() {
         return;
     }
     focus_field(ui, id, text);
@@ -315,13 +310,33 @@ fn select_all(ui: &Ui, id: egui::Id, text: &str) {
     st.store(ui.ctx(), id);
 }
 
-/// Numeric fields take the whole text, unit included, when they gain focus or are double-clicked
-/// (egui would select one word): typing a number or an expression replaces it.
+/// Numeric fields select the whole text on keyboard focus, a completed focus click or a
+/// double-click. A pointer press keeps its caret so dragging selects from the pressed position.
 fn select_all_on_focus(ui: &Ui, resp: &Response, text: &str) {
-    if !(resp.gained_focus() || resp.double_clicked()) {
+    let pending = resp.id.with("select-all-on-focus-click");
+    let (pressed, released) =
+        ui.input(|i| (i.pointer.button_pressed(egui::PointerButton::Primary), i.pointer.button_released(egui::PointerButton::Primary)));
+    if resp.gained_focus() {
+        ui.data_mut(|d| {
+            if pressed {
+                d.insert_temp(pending, true);
+            } else {
+                d.remove_temp::<bool>(pending);
+            }
+        });
+    }
+    let clicked_focus = released && ui.data_mut(|d| d.remove_temp::<bool>(pending)).unwrap_or(false) && resp.clicked_by(egui::PointerButton::Primary);
+    if resp.lost_focus() {
+        ui.data_mut(|d| d.remove_temp::<bool>(pending));
+    }
+    if !(resp.gained_focus() && !pressed || resp.double_clicked() || clicked_focus) {
         return;
     }
-    if egui::TextEdit::load_state(ui.ctx(), resp.id).is_some() {
+    if let Some(st) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
+        // Preserve a text selection if the focus click already produced one.
+        if clicked_focus && !resp.double_clicked() && st.cursor.char_range().is_some_and(|r| !r.as_sorted_char_range().is_empty()) {
+            return;
+        }
         select_all(ui, resp.id, text);
         ui.ctx().request_repaint();
     }
@@ -334,27 +349,32 @@ fn recessed_text(ui: &mut Ui, id: egui::Id, shown: &str, width: f32, rows: usize
     let t = Tokens::get(ui.ctx());
     let editing = ui.memory(|m| m.has_focus(id));
     let mut buf: String = if editing { ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| shown.to_string()) } else { shown.to_string() };
+    // The box is exactly as tall as the other controls of a row (26 points a line), its text
+    // centred in it: a frame around the text came out a point taller and stood out next to
+    // spinners and dropdowns (#900).
     let height = 26.0 + 16.0 * (rows.max(1) - 1) as f32;
+    let layout = if rows > 1 { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Center) };
     let (rect, resp) = ui
-        .allocate_ui_with_layout(vec2(width, height), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.set_min_width(width);
-            let framed = egui::Frame::NONE
-                .fill(t.input)
-                .stroke(Stroke::new(1.0, if editing { t.accent } else { t.input_border }))
-                .corner_radius(CornerRadius::same(2))
-                .inner_margin(egui::Margin::symmetric(6, 4))
+        .allocate_ui_with_layout(vec2(width, height), layout, |ui| {
+            ui.set_min_size(vec2(width, height));
+            let rect = ui.max_rect();
+            ui.painter().rect(rect, 2.0, t.input, Stroke::new(1.0, if editing { t.accent } else { t.input_border }), StrokeKind::Inside);
+            let margin = egui::Margin { left: 7, right: 7, top: if rows > 1 { 4 } else { 0 }, bottom: 0 };
+            let resp = egui::Frame::NONE
+                .inner_margin(margin)
                 .show(ui, |ui| {
                     let edit = if rows > 1 { egui::TextEdit::multiline(&mut buf).desired_rows(rows) } else { egui::TextEdit::singleline(&mut buf) };
                     ui.add(
                         edit.id(id)
                             .frame(egui::Frame::NONE)
+                            .margin(egui::Margin::ZERO)
                             .desired_width(width - 14.0)
-                            .min_size(vec2(width - 14.0, 0.0))
                             .font(egui::FontId::proportional(12.5))
                             .text_color(t.text_strong),
                     )
-                });
-            (framed.response.rect, framed.inner)
+                })
+                .inner;
+            (rect, resp)
         })
         .inner;
     ui.data_mut(|d| d.insert_temp(id, buf.clone()));
@@ -369,6 +389,14 @@ pub fn text_field(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, value
     let shown = value.unwrap_or_default();
     let (buf, resp, _) = recessed_text(ui, id, shown, width, rows);
     (resp.lost_focus() && buf.trim() != shown).then(|| buf.trim().to_string())
+}
+
+/// A one-line [`text_field`] that keeps the text exactly as typed, spaces included (a tab
+/// leader such as ". "). Returns it when a change is committed (Enter or focus loss).
+pub fn exact_text_field(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, value: &str, width: f32) -> Option<String> {
+    let id = ui.id().with(id);
+    let (buf, resp, _) = recessed_text(ui, id, value, width, 1);
+    (resp.lost_focus() && buf != value).then_some(buf)
 }
 
 /// A form row: `label` in a column `label_width` wide, then what `add` draws.
@@ -425,6 +453,7 @@ pub fn mixed_field(
         vectorcraft_doc::parse_number(&bare.replace(['%', '°'], ""))
     };
     let shown = value.map(show).unwrap_or_default();
+    take_dialog_focus(ui, id, &shown);
     let (mut buf, resp, rect) = recessed_text(ui, id, &shown, width, 1);
     select_all_on_focus(ui, &resp, &buf);
     // ↑/↓ and the wheel step at the field's precision (a count ignores Ctrl/Cmd's tenth); a drag on
@@ -590,10 +619,10 @@ pub fn fill_stroke_proxy(ui: &mut Ui, fill: &Paint, stroke: &Paint, mixed: (bool
         None
     };
     ProxyClicks {
-        fill: fill_resp.on_hover_text("Fill (X), double-click for the Color Picker").clicked(),
-        stroke: stroke_resp.on_hover_text("Stroke (X), double-click for the Color Picker").clicked(),
-        swap: swap.on_hover_text("Swap Fill and Stroke (Shift+X)").clicked(),
-        default: def.on_hover_text("Default Fill and Stroke (D)").clicked(),
+        fill: fill_resp.on_hover_text(tl!("Fill (X), double-click for the Color Picker")).clicked(),
+        stroke: stroke_resp.on_hover_text(tl!("Stroke (X), double-click for the Color Picker")).clicked(),
+        swap: swap.on_hover_text(tl!("Swap Fill and Stroke (Shift+X)")).clicked(),
+        default: def.on_hover_text(tl!("Default Fill and Stroke (D)")).clicked(),
         pick,
     }
 }
@@ -655,16 +684,70 @@ pub(crate) fn combo<R>(
         .stroke(Stroke::new(1.0, t.input_border))
         .corner_radius(CornerRadius::same(3))
         .show(ui, |ui| {
+            if searchable {
+                return searchable_combo(ui, ui.id().with(id), current, width - 4.0, list);
+            }
             egui::ComboBox::from_id_salt(ui.id().with(id))
                 .selected_text(egui::RichText::new(current).size(12.0))
                 .width(width - 4.0)
-                .close_behavior(if searchable { egui::PopupCloseBehavior::CloseOnClickOutside } else { egui::PopupCloseBehavior::CloseOnClick })
-                .height(if searchable { f32::INFINITY } else { ui.spacing().combo_height })
+                .height(ui.spacing().combo_height)
                 .show_ui(ui, list)
                 .inner
                 .flatten()
         })
         .inner
+}
+
+/// A dropdown whose list keeps its own search field and scrolling rows (the font menu): drawn as
+/// egui's combo box, but in a popup without the scroll area egui puts around a combo's list, so
+/// the field stays at the top and only the rows scroll (#555). A click outside closes it.
+fn searchable_combo<R>(ui: &mut Ui, id: egui::Id, current: &str, width: f32, list: impl FnOnce(&mut Ui) -> Option<R>) -> Option<R> {
+    let popup = id.with("popup");
+    let open = egui::Popup::is_id_open(ui.ctx(), popup);
+    let pad = ui.spacing().button_padding;
+    let icon = Vec2::splat(ui.spacing().icon_width);
+    let galley = egui::WidgetText::from(egui::RichText::new(current).size(12.0)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        width - 2.0 * pad.x - ui.spacing().icon_spacing - icon.x,
+        egui::TextStyle::Button,
+    );
+    let height = (galley.size().y.max(icon.y) + 2.0 * pad.y).max(ui.spacing().interact_size.y);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let v = if open { ui.visuals().widgets.open } else { *ui.style().interact(&resp) };
+        ui.painter().rect(rect.expand(v.expansion), v.corner_radius, v.weak_bg_fill, v.bg_stroke, StrokeKind::Inside);
+        let inner = rect.shrink2(pad);
+        ui.painter().galley(egui::Align2::LEFT_CENTER.align_size_within_rect(galley.size(), inner).min, galley, v.text_color());
+        // egui's combo arrow: a downward triangle.
+        let arrow =
+            Rect::from_center_size(egui::Align2::RIGHT_CENTER.align_size_within_rect(icon, inner).center(), vec2(icon.x * 0.7, icon.y * 0.45));
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![arrow.left_top(), arrow.right_top(), arrow.center_bottom()],
+            v.fg_stroke.color,
+            Stroke::NONE,
+        ));
+    }
+    // It opens below the button, or above it when there is more room there, and the list gets
+    // the room left (the popup's frame aside).
+    const GAP: f32 = 12.0;
+    let screen = ui.ctx().content_rect();
+    let frame = ui.spacing().menu_margin.sum().y + GAP;
+    let (below, above) = (screen.bottom() - rect.bottom() - frame, rect.top() - screen.top() - frame);
+    let (align, room) = if below >= above { (egui::RectAlign::BOTTOM_START, below) } else { (egui::RectAlign::TOP_START, above) };
+    egui::Popup::menu(&resp)
+        .id(popup)
+        .width(rect.width())
+        .align(align)
+        .align_alternatives(&[])
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_max_height(room);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            list(ui)
+        })
+        .and_then(|r| r.inner)
 }
 
 /// A popover anchored to `resp`, opened and closed by `toggle` (usually `resp.clicked()`), and
@@ -716,8 +799,20 @@ pub fn menu_scroll<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R
 /// A column of tool or panel buttons (the toolbar, the dock's icon column) that scrolls when the
 /// window is too short for it: with the mouse wheel, or the scroll bar shown while the pointer is
 /// over it.
+/// Its scroll bar stays a slim line at the edge, even while scrolled or dragged, so it never covers
+/// the buttons (#808).
 pub fn strip_scroll<R>(ui: &mut Ui, id: &str, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
-    egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, true]).show(ui, add_contents).inner
+    ui.scope(|ui| {
+        ui.spacing_mut().scroll = egui::style::ScrollStyle {
+            bar_width: 4.0,
+            floating_width: 2.0,
+            bar_inner_margin: 0.0,
+            bar_outer_margin: 1.0,
+            ..egui::style::ScrollStyle::floating()
+        };
+        egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, true]).show(ui, add_contents).inner
+    })
+    .inner
 }
 
 /// Whether the blend-mode list draws a separator above `BlendMode::ALL[i]`: where a
@@ -836,6 +931,31 @@ pub fn reference_point(ui: &mut Ui, current: usize) -> Option<usize> {
     out
 }
 
+/// An angle dial `size` points across: a circle with a hand from its centre at `angle` (degrees,
+/// counter-clockwise from 3 o'clock). Pressing or dragging points the hand at the pointer, in whole
+/// degrees (-179..180), Shift in 45° steps. Returns the new angle.
+pub fn angle_dial(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, angle: f64, size: f32) -> Option<f64> {
+    let t = Tokens::get(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let resp = ui.interact(rect, ui.id().with(id), Sense::click_and_drag());
+    let (c, r) = (rect.center(), size / 2.0 - 1.0);
+    let ring = if resp.hovered() || resp.dragged() { t.text } else { t.input_border };
+    ui.painter().circle(c, r, t.input, Stroke::new(1.0, ring));
+    let a = (angle as f32).to_radians();
+    ui.painter().line_segment([c, c + vec2(a.cos(), -a.sin()) * (r - 3.0)], Stroke::new(1.5, t.text));
+    ui.painter().circle_filled(c, 2.0, t.text);
+    let (p, _) = pointer_phase(&resp)?;
+    let v = p - c;
+    if v.length() < 2.0 {
+        return None;
+    }
+    let step = if ui.input(|i| i.modifiers.shift) { 45.0 } else { 1.0 };
+    let deg = ((-v.y).atan2(v.x).to_degrees() as f64 / step).round() * step;
+    // atan2 gives -180..180: -180 shows as 180.
+    let deg = if deg <= -180.0 { deg + 360.0 } else { deg };
+    (deg != angle).then_some(deg)
+}
+
 /// A toggle icon (e.g. eye / lock columns) — returns clicked.
 pub fn toggle_icon(ui: &mut Ui, on_icon: &str, on: bool, size: f32, tip: &str) -> bool {
     let t = Tokens::get(ui.ctx());
@@ -883,12 +1003,11 @@ pub fn link_label(ui: &mut Ui, text: &str) -> Response {
     resp
 }
 
-/// The row of a checkbox or radio button: allocates a 13 pt box plus `label`, draws the label and
-/// returns the box, the response and the box's border colour.
-fn choice_row(ui: &mut Ui, label: &str, enabled: bool) -> (Rect, Response, Color32) {
+/// The row of a checkbox or radio button: allocates a 13 pt box plus `text` (already translated),
+/// draws the text and returns the box, the response and the box's border colour.
+fn choice_row(ui: &mut Ui, text: &str, enabled: bool) -> (Rect, Response, Color32) {
     let t = Tokens::get(ui.ctx());
-    let galley =
-        ui.painter().layout_no_wrap(tl!(label).to_string(), egui::FontId::proportional(12.5), if enabled { t.text } else { t.text_disabled });
+    let galley = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(12.5), if enabled { t.text } else { t.text_disabled });
     let (rect, resp) =
         ui.allocate_exact_size(vec2(18.0 + galley.size().x, 20.0f32.max(galley.size().y)), if enabled { Sense::click() } else { Sense::hover() });
     let bx = Rect::from_min_size(pos2(rect.left(), rect.center().y - 6.5), Vec2::splat(13.0));
@@ -908,10 +1027,29 @@ pub fn check(ui: &mut Ui, label: &str, value: bool, enabled: bool) -> bool {
     check3(ui, label, Some(value), enabled)
 }
 
+/// [`check`] with tooltip `tip` on the box and its label. Returns true when toggled.
+pub fn check_tip(ui: &mut Ui, label: &str, value: bool, enabled: bool, tip: &str) -> bool {
+    let (clicked, resp) = check_row(ui, tl!(label), Some(value), enabled);
+    resp.on_hover_text(tip);
+    clicked
+}
+
 /// Three-state [`check`]: `None` shows a dash (a neutral or mixed state). Returns true when clicked.
 pub fn check3(ui: &mut Ui, label: &str, value: Option<bool>, enabled: bool) -> bool {
+    check_row(ui, tl!(label), value, enabled).0
+}
+
+/// [`check`] for a name of the document's (an artboard's, an asset's), shown as it is, never
+/// translated. Returns true when toggled.
+pub fn check_name(ui: &mut Ui, name: &str, value: bool) -> bool {
+    check_row(ui, name, Some(value), true).0
+}
+
+/// [`check3`] with its `text` already translated, also returning the row's response (what a
+/// tooltip goes on: a widget around it never counts as hovered under the box).
+fn check_row(ui: &mut Ui, text: &str, value: Option<bool>, enabled: bool) -> (bool, Response) {
     let t = Tokens::get(ui.ctx());
-    let (bx, resp, border) = choice_row(ui, label, enabled);
+    let (bx, resp, border) = choice_row(ui, text, enabled);
     let checked = value == Some(true);
     ui.painter().rect_filled(bx, CornerRadius::same(2), if checked && enabled { t.accent_strong } else { t.input });
     ui.painter().rect_stroke(bx, CornerRadius::same(2), Stroke::new(1.0, border), StrokeKind::Inside);
@@ -927,13 +1065,13 @@ pub fn check3(ui: &mut Ui, label: &str, value: Option<bool>, enabled: bool) -> b
         }
         Some(false) => {}
     }
-    enabled && resp.clicked()
+    (enabled && resp.clicked(), resp)
 }
 
 /// Radio button in the style of [`check`], with a disabled state. Returns true when clicked.
 pub fn radio(ui: &mut Ui, label: &str, selected: bool, enabled: bool) -> bool {
     let t = Tokens::get(ui.ctx());
-    let (bx, resp, border) = choice_row(ui, label, enabled);
+    let (bx, resp, border) = choice_row(ui, tl!(label), enabled);
     let c = bx.center();
     ui.painter().circle(c, 6.0, if selected && enabled { t.accent_strong } else { t.input }, Stroke::new(1.0, border));
     if selected {
@@ -1032,7 +1170,8 @@ fn spin_generic(
     let h = 26.0;
     let enabled = ui.is_enabled();
     ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
+        // The spinner, the field and the chevron share their borders: one box in three parts.
+        ui.spacing_mut().item_spacing.x = -1.0;
         let (sr, sresp) = ui.allocate_exact_size(vec2(16.0, h), Sense::click());
         ui.painter().rect_filled(sr, CornerRadius { nw: 2, sw: 2, ne: 0, se: 0 }, t.input);
         ui.painter().rect_stroke(sr, CornerRadius { nw: 2, sw: 2, ne: 0, se: 0 }, Stroke::new(1.0, t.input_border), StrokeKind::Inside);
@@ -1057,10 +1196,10 @@ fn spin_generic(
             && let Some(p) = sresp.interact_pointer_pos()
             && let Some(v) = value
         {
-            let nv = if up.contains(p) { v + step } else { v - step };
-            out = Some(SpinPick::Value(nv.max(min)));
+            let modifiers = ui.input(|i| i.modifiers);
+            out = Some(SpinPick::Value(spinner_step(v, step, min, up.contains(p), modifiers)));
         }
-        let fw = if presets.is_empty() { width - 16.0 } else { width - 36.0 };
+        let fw = if presets.is_empty() { width - 15.0 } else { width - 34.0 };
         if let Some(v) = field(ui, fw) {
             out = Some(SpinPick::Value(v.max(min)));
         }
@@ -1083,6 +1222,14 @@ fn spin_generic(
         }
     });
     out
+}
+
+/// Spinner buttons follow the same modifier sizes as ↑/↓ in a focused number field:
+/// Shift ×10, Ctrl/Cmd ÷10, otherwise the caller's normal step.
+fn spinner_step(value: f64, step: f64, min: f64, up: bool, modifiers: egui::Modifiers) -> f64 {
+    let multiplier = STEPS.iter().find(|(m, _)| modifiers.matches_logically(*m)).map_or(1.0, |(_, factor)| *factor);
+    let delta = step * multiplier;
+    (value + if up { delta } else { -delta }).max(min)
 }
 
 /// Drag phase of a live slider/handle: previews while dragging, commits on release.
@@ -1381,6 +1528,9 @@ pub enum PanelDrag {
     /// A Brushes panel brush (`def`: its definition, for the chip at the pointer): the path it is
     /// dropped on takes it (`brush.apply`).
     Brush { name: String, def: serde_json::Value },
+    /// A Libraries panel graphic (`item`: its id in `library`): the canvas places a copy centred
+    /// where it is dropped (`library.use`).
+    LibraryGraphic { library: String, item: String },
 }
 
 /// A panel list `zone` that takes art dragged off the canvas: outlined while art is held over it;
@@ -1552,7 +1702,7 @@ pub fn harmony_wheel(ui: &mut Ui, id: &str, size: f32, colors: &[Color], base: O
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.add_space(((ui.available_width() - size - 76.0) / 2.0).max(0.0));
-        ui.add_sized([70.0, 22.0], egui::Label::new(egui::RichText::new("Brightness").color(t.text_dim)));
+        ui.add_sized([70.0, 22.0], egui::Label::new(egui::RichText::new(tl!("Brightness")).color(t.text_dim)));
         if let (Some(b), Some([h, s, _])) = (base, base_hsb)
             && let (Some(nv), _) = color_slider(ui, (id, "brightness"), v, size, &|x| crate::panels::c32(&Color::from_hsb(h, s, x)))
         {
@@ -1612,6 +1762,51 @@ pub fn orientation_button(ui: &mut Ui, landscape: bool, selected: bool, tip: &st
     resp.on_hover_text(tl!(tip)).clicked()
 }
 
+/// An artboard-layout toggle drawn in code (Rearrange All Artboards): small artboards in the grid
+/// cells `tiles` (column, row), tinted, and over them their order as a line from a dot on the first
+/// to an arrowhead on the last; accent-drawn in a pressed well when `selected`, greyed in a disabled
+/// `ui`. `tip` is shown as it is (the caller translates it). Returns clicked.
+pub fn layout_button(ui: &mut Ui, tiles: &[(u8, u8)], selected: bool, tip: &str) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+    let enabled = ui.is_enabled();
+    let bg = if selected {
+        t.tool_active
+    } else if resp.hovered() && enabled {
+        t.hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(3), bg);
+    let color = if !enabled {
+        t.text_disabled
+    } else if selected {
+        t.accent
+    } else {
+        t.icon
+    };
+    // Cells at most 10 points a side in a 20-point square: a row's artboards stand tall, a
+    // column's lie flat.
+    let (cols, rows) = tiles.iter().fold((1u8, 1u8), |(c, r), &(x, y)| (c.max(x.saturating_add(1)), r.max(y.saturating_add(1))));
+    let cell = vec2((20.0 / f32::from(cols)).min(10.0), (20.0 / f32::from(rows)).min(10.0));
+    let origin = rect.center() - vec2(f32::from(cols) * cell.x, f32::from(rows) * cell.y) / 2.0;
+    let centre = |&(x, y): &(u8, u8)| origin + vec2((f32::from(x) + 0.5) * cell.x, (f32::from(y) + 0.5) * cell.y);
+    for tile in tiles {
+        ui.painter().rect_filled(Rect::from_center_size(centre(tile), cell - vec2(2.0, 2.0)), 1.0, color.gamma_multiply(0.35));
+    }
+    let path: Vec<Pos2> = tiles.iter().map(centre).collect();
+    if let ([first, ..], [.., from, to]) = (path.as_slice(), path.as_slice()) {
+        let (first, from, to) = (*first, *from, *to);
+        let dir = (to - from).normalized();
+        let side = dir.rot90() * 2.5;
+        let head = vec![to + dir * 1.5, to - dir * 2.5 + side, to - dir * 2.5 - side];
+        ui.painter().circle_filled(first, 1.6, color);
+        ui.painter().add(egui::Shape::line(path, Stroke::new(1.2, color)));
+        ui.painter().add(egui::Shape::convex_polygon(head, color, Stroke::NONE));
+    }
+    resp.on_hover_text(tip).clicked()
+}
+
 /// `region` of `doc` rendered on white, its longest side `px` pixels, as a texture named `name`
 /// (artboard and page thumbnails).
 pub fn region_texture(
@@ -1650,8 +1845,9 @@ fn chevron_cell(ui: &mut Ui, h: f32) -> Response {
 pub fn text_presets(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, value: &str, presets: &[&str], width: f32) -> Option<String> {
     let mut out = None;
     ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        out = text_field(ui, &id, Some(value), width - 20.0, 1);
+        // The field and the chevron share a border.
+        ui.spacing_mut().item_spacing.x = -1.0;
+        out = text_field(ui, &id, Some(value), width - 19.0, 1);
         let resp = chevron_cell(ui, 26.0);
         egui::Popup::menu(&resp).show(|ui| {
             ui.set_min_width(width - 10.0);
@@ -1663,4 +1859,22 @@ pub fn text_presets(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, val
         });
     });
     out
+}
+
+#[cfg(test)]
+mod spinner_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn shift_steps_stroke_weight_by_ten_points() {
+        assert_eq!(spinner_step(14.0, 1.0, 0.0, true, egui::Modifiers::SHIFT), 24.0);
+        assert_eq!(spinner_step(14.0, 1.0, 0.0, false, egui::Modifiers::SHIFT), 4.0);
+    }
+
+    #[test]
+    fn unmodified_and_command_steps_keep_existing_behavior() {
+        assert_eq!(spinner_step(14.0, 1.0, 0.0, true, egui::Modifiers::NONE), 15.0);
+        assert_eq!(spinner_step(14.0, 1.0, 0.0, false, egui::Modifiers::COMMAND), 13.9);
+        assert_eq!(spinner_step(0.0, 1.0, 0.0, false, egui::Modifiers::SHIFT), 0.0);
+    }
 }

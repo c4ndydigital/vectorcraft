@@ -293,9 +293,9 @@ pub(crate) fn anti_alias(id: &str) -> std::result::Result<AntiAlias, String> {
     AntiAlias::from_id(id).ok_or_else(|| format!("antiAlias `{id}`: none, art or type"))
 }
 
-/// The `useArtboards` param of a PDF, DXF or raster export (SVG has its own): `true` writes every
+/// The `useArtboards` param of a PDF, AI, DXF or raster export (SVG has its own): `true` writes every
 /// chosen artboard (default all), `false` the bounds of the visible art instead, absent one
-/// artboard (raster, DXF) or the chosen pages (PDF).
+/// artboard (raster, DXF) or the chosen pages (PDF, AI).
 fn use_artboards(p: &Value) -> Result<Option<bool>> {
     match p.get("useArtboards") {
         None | Some(Value::Null) => Ok(None),
@@ -364,6 +364,23 @@ pub fn encode_with_warnings(doc: &Document, format: &str, p: &Value) -> Result<(
 
 /// [`encode`], with every file the export writes.
 pub fn encode_all(doc: &Document, format: &str, p: &Value) -> Result<Encoded> {
+    let format = super::writable(C, Some(format), None)?.id;
+    // Formats with editing data prepare their drawn output separately from their original
+    // document. Other formats only need the placed files' art.
+    if !matches!(format, "vectorcraft" | "template" | "ai" | "pdf" | "eps" | "svg" | "svgz") {
+        let (full, warnings) = crate::cmd::place::document::full_documents(doc);
+        if !warnings.is_empty() {
+            let mut enc = encode_all_of(&full, format, p)?;
+            enc.warnings.extend(warnings);
+            return Ok(enc);
+        }
+        return encode_all_of(&full, format, p);
+    }
+    encode_all_of(doc, format, p)
+}
+
+/// [`encode_all`] of `doc` as it is.
+fn encode_all_of(doc: &Document, format: &str, p: &Value) -> Result<Encoded> {
     let f = super::writable(C, Some(format), None)?;
     let mut enc = encode_files(doc, f, p)?;
     // Formats that draw type: missing fonts come out in the fallback font (PDF and SVG say so
@@ -381,7 +398,7 @@ fn encode_files(doc: &Document, f: &Format, p: &Value) -> Result<Encoded> {
     let doc = &*doc.without_edit_modes();
     let n = doc.artboards.len();
     // SVG reads its own `useArtboards` (an SVG option).
-    let use_artboards = if f.raster || matches!(f.id, "pdf" | "dxf" | "emf" | "wmf") { use_artboards(p)? } else { None };
+    let use_artboards = if f.raster || matches!(f.id, "pdf" | "ai" | "dxf" | "emf" | "wmf") { use_artboards(p)? } else { None };
     if use_artboards == Some(false) {
         let bounds = vectorcraft_render::encode::art_bounds(doc).ok_or_else(|| bad(C, "nothing to export: the document has no visible art"))?;
         let mut q = super::export::without_artboards(p);
@@ -405,6 +422,7 @@ fn encode_files(doc: &Document, f: &Format, p: &Value) -> Result<Encoded> {
         "eps" => return super::eps::encode(doc, p),
         "emf" => return super::metafile::encode(doc, p, use_artboards, vectorcraft_metafile::Kind::Emf),
         "wmf" => return super::metafile::encode(doc, p, use_artboards, vectorcraft_metafile::Kind::Wmf),
+        "ai" => return super::save::encode_ai(C, f, doc, p),
         "pdf" => {
             let (bytes, warnings) = super::pdf::encode(C, doc, p)?;
             return Ok(Encoded { warnings, ..Encoded::one(bytes) });

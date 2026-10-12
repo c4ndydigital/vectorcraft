@@ -291,7 +291,7 @@ impl<'a> Scene<'a> {
                 }
             }
             // Live blends, envelopes, meshes and repeats are written as their evaluated art.
-            NodeKind::Blend { .. } | NodeKind::Envelope { .. } | NodeKind::Mesh(_) | NodeKind::Repeat(_) => {
+            NodeKind::Blend { .. } | NodeKind::Envelope { .. } | NodeKind::Mesh(_) | NodeKind::Repeat(_) | NodeKind::PlacedDocument(_) => {
                 let g = vectorcraft_effects::expand_live_deep(Some(self.doc), n);
                 for c in g.children().into_iter().flatten() {
                     self.node(c, false);
@@ -322,7 +322,7 @@ impl<'a> Scene<'a> {
 
     /// Warn about what EPS can't hold in `n`'s look.
     fn note_losses(&mut self, n: &Node) {
-        if n.opacity < 1.0 || n.blend != BlendMode::Normal || n.mask.as_ref().is_some_and(|m| !m.disabled) {
+        if n.opacity < 1.0 || n.blend != BlendMode::Normal || n.extras().mask.as_ref().is_some_and(|m| !m.disabled) {
             self.warn(TRANSPARENCY);
         }
         let raster = |fx: &[Effect]| fx.iter().any(|e| e.visible && vectorcraft_effects::is_raster(&e.id));

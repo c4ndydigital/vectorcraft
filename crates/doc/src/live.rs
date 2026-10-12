@@ -1222,7 +1222,7 @@ pub fn envelope_of(doc: &crate::Document, id: NodeId) -> Option<&Node> {
 /// edit (its points and handles).
 pub fn envelope_overlay(n: &Node) -> Option<(PathData, Option<GradientMesh>)> {
     let NodeKind::Envelope { kind, .. } = &n.kind else { return None };
-    match kind {
+    match &**kind {
         EnvelopeKind::Mesh { rows, cols, points, handles } => {
             let grid = envelope_grid(*rows, *cols, points, handles)?;
             Some((grid.lines(), Some(grid)))
@@ -1270,7 +1270,7 @@ impl<'a> EnvelopeMap<'a> {
     /// The map of envelope node `n` (`None` for other nodes).
     pub fn of(n: &'a Node) -> Option<Self> {
         match &n.kind {
-            NodeKind::Envelope { content, kind, frame, .. } => Self::new(content, kind, *frame),
+            NodeKind::Envelope { content, kind, frame, .. } => Self::new(content, kind, **frame),
             _ => None,
         }
     }
@@ -1388,7 +1388,7 @@ fn carry_look(from: &Node, mut to: Node) -> Node {
     to.isolate = from.isolate;
     to.knockout = from.knockout;
     to.knockout_shape = from.knockout_shape;
-    to.mask = from.mask.clone();
+    to.extras_mut().mask = from.extras().mask.clone();
     to.appearance.effects = from.appearance.effects.clone();
     to
 }
@@ -1417,7 +1417,7 @@ fn map_node(n: &Node, w: &Warper) -> Node {
     {
         out.appearance.warp_linear_gradients(b, &|p| affine_near(w.f, p, w.eps));
     }
-    if let Some(m) = &mut out.mask {
+    if let Some(m) = out.extras_if_any().and_then(|e| e.mask.as_mut()) {
         m.art = Arc::new(map_node(&m.art, w));
     }
     match &mut out.kind {
@@ -1447,6 +1447,8 @@ fn map_node(n: &Node, w: &Warper) -> Node {
             let im = im.clone();
             return warp_image(&out, &im, w);
         }
+        // Its art is plain, so it warps at this depth.
+        NodeKind::PlacedDocument(_) => return map_node(&expanded_group_hooks(n, w.hooks), w),
     }
     out
 }
@@ -1492,7 +1494,7 @@ fn warp_image(n: &Node, im: &ImageObject, w: &Warper) -> Node {
                 if let NodeKind::Path { clipping, .. } = &mut clip.kind {
                     *clipping = true;
                 }
-                let image = Node::new(n.id, NodeKind::Image(ImageObject { xf, ..im.clone() }));
+                let image = Node::new(n.id, NodeKind::Image(Box::new(ImageObject { xf, ..im.clone() })));
                 pieces.push(Arc::new(Node::new(n.id, NodeKind::Group { children: vec![Arc::new(clip), Arc::new(image)], clip: true })));
             }
         }
@@ -1521,17 +1523,18 @@ fn pattern_art(n: &Node, tiles: PatternTiles) -> Option<Node> {
         _ => None,
     };
     let plain = |items: Vec<AppearanceItem>| {
-        Arc::new(Node {
-            appearance: Appearance { items, ..Default::default() },
+        let mut p = Node {
+            appearance: Appearance { items, ..Default::default() }.into(),
             opacity: 1.0,
             blend: Default::default(),
             isolate: false,
             knockout: Default::default(),
             knockout_shape: false,
-            mask: None,
             name: None,
             ..n.clone()
-        })
+        };
+        p.extras_mut().mask = None;
+        Arc::new(p)
     };
     let mut pieces = vec![];
     let mut rest = vec![];
@@ -1558,7 +1561,7 @@ fn pattern_art(n: &Node, tiles: PatternTiles) -> Option<Node> {
     }
     Some(Node {
         kind: NodeKind::Group { children: pieces, clip: false },
-        appearance: Appearance { effects: n.appearance.effects.clone(), ..Default::default() },
+        appearance: Appearance { effects: n.appearance.effects.clone(), ..Default::default() }.into(),
         ..n.clone()
     })
 }
@@ -1607,7 +1610,7 @@ pub fn envelope_bounds(content: &[Arc<Node>], kind: &EnvelopeKind, frame: Affine
 
 /// Is this one of the live kinds?
 pub fn is_live(n: &Node) -> bool {
-    matches!(n.kind, NodeKind::Blend { .. } | NodeKind::Envelope { .. } | NodeKind::Mesh(_) | NodeKind::Repeat(_))
+    matches!(n.kind, NodeKind::Blend { .. } | NodeKind::Envelope { .. } | NodeKind::Mesh(_) | NodeKind::Repeat(_) | NodeKind::PlacedDocument(_))
 }
 
 /// Mesh tessellation as filled quad paths (no stroke), `n`×`n` per patch.
@@ -1638,9 +1641,10 @@ pub fn expand_live_with(n: &Node, outline: Outliner) -> Vec<Node> {
 pub fn expand_live_hooks(n: &Node, hooks: Hooks) -> Vec<Node> {
     match &n.kind {
         NodeKind::Blend { children, spec } => blend_expand(children, spec),
-        NodeKind::Envelope { content, kind, fidelity, options, frame, .. } => expand_envelope(content, kind, *fidelity, *options, *frame, hooks),
+        NodeKind::Envelope { content, kind, fidelity, options, frame, .. } => expand_envelope(content, kind, *fidelity, *options, **frame, hooks),
         NodeKind::Mesh(m) => mesh_quad_nodes(m, 8),
         NodeKind::Repeat(r) => r.expand(),
+        NodeKind::PlacedDocument(p) => p.art(n),
         _ => vec![n.clone()],
     }
 }
@@ -1666,7 +1670,7 @@ pub fn expanded_group_hooks(n: &Node, hooks: Hooks) -> Node {
         g.knockout = crate::Knockout::Off;
     }
     g.knockout_shape = n.knockout_shape;
-    g.mask = n.mask.clone();
+    g.extras_mut().mask = n.extras().mask.clone();
     g
 }
 

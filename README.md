@@ -23,8 +23,9 @@
 
 <p align="center">
   <a href="https://vector.c4ndy.com"><b>🎨 Test the live collaborative WebAssembly demo at vector.c4ndy.com</b></a><br>
-  <sub><i>Shallow fork of <a href="https://github.com/storytold/vectorcraft">storytold/vectorcraft</a> featuring real-time multiplayer CRDT sync, multi-room collaboration, and self-hosted server capabilities.</i></sub>
+  <sub><i>This repository is a shallow fork of <a href="https://github.com/storytold/vectorcraft">storytold/vectorcraft</a> created to integrate and showcase real-time multiplayer collaboration (CRDT sync, live peer cursors, multi-room sharing, and self-hosted WebAssembly server capabilities) directly into VectorCraft.</i></sub>
 </p>
+
 
 
 <p align="center">

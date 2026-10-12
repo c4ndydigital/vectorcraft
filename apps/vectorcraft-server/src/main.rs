@@ -592,9 +592,9 @@ fn build_csp(umami: Option<&UmamiConfig>) -> String {
 
     let extra = umami_host.as_deref().unwrap_or("");
     let script_src = if extra.is_empty() {
-        "script-src 'self' 'wasm-unsafe-eval'".to_string()
+        "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'".to_string()
     } else {
-        format!("script-src 'self' 'wasm-unsafe-eval' {extra}")
+        format!("script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' {extra}")
     };
     let connect_src = if extra.is_empty() {
         "connect-src 'self' ws: wss:".to_string()

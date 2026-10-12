@@ -146,3 +146,42 @@ fn test_crdt_artboard_dimension_sync() {
     assert_eq!(artboard_b.rect.width(), 1200.0);
     assert_eq!(artboard_b.rect.height(), 900.0);
 }
+
+#[test]
+fn test_crdt_z_order_synchronization() {
+    let mut session_a = session_with(800.0, 600.0);
+    let mut session_b = session_with(800.0, 600.0);
+
+    let mut bridge_a = CollabBridge::with_client_id(401);
+    let mut bridge_b = CollabBridge::with_client_id(402);
+
+    // Create bottom rect 1 and top rect 2
+    let r1 = session_a.execute("shape.rectangle", &json!({ "x": 10.0, "y": 10.0, "width": 50.0, "height": 50.0 })).unwrap();
+    let r2 = session_a.execute("shape.rectangle", &json!({ "x": 20.0, "y": 20.0, "width": 50.0, "height": 50.0 })).unwrap();
+    let id1 = NodeId(r1["id"].as_u64().unwrap());
+    let id2 = NodeId(r2["id"].as_u64().unwrap());
+
+    // Initially id1 is at index 0, id2 is at index 1
+    let pos1_init = session_a.doc().unwrap().doc.position(id1).unwrap().1;
+    let pos2_init = session_a.doc().unwrap().doc.position(id2).unwrap().1;
+    assert!(pos1_init < pos2_init);
+
+    // Send r2 to back (now r2 is at index 0, r1 is at index 1)
+    select(&mut session_a, &[id2]);
+    session_a.execute("object.arrange.sendToBack", &json!({})).unwrap();
+
+    let pos2_after = session_a.doc().unwrap().doc.position(id2).unwrap().1;
+    let pos1_after = session_a.doc().unwrap().doc.position(id1).unwrap().1;
+    assert!(pos2_after < pos1_after, "r2 should now be behind r1");
+
+    // Sync session_a to session_b
+    let update = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &update).unwrap();
+
+    // Verify session_b reflects the exact same Z-order
+    let pos2_b = session_b.doc().unwrap().doc.position(id2).unwrap().1;
+    let pos1_b = session_b.doc().unwrap().doc.position(id1).unwrap().1;
+    assert_eq!(pos2_b, pos2_after);
+    assert_eq!(pos1_b, pos1_after);
+    assert!(pos2_b < pos1_b, "r2 must be behind r1 in session_b as well");
+}

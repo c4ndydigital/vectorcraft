@@ -1037,11 +1037,7 @@ impl VectorcraftApp {
                 CollabIncoming::Blob { key, mime, bytes } => {
                     if let Some(st) = self.session.active_mut() {
                         let doc = std::sync::Arc::make_mut(&mut st.doc);
-                        doc.images.insert(key, vectorcraft_doc::ImageBlob {
-                            mime,
-                            bytes: std::sync::Arc::new(bytes),
-                            proxy: None,
-                        });
+                        doc.images.insert(key, vectorcraft_doc::ImageBlob { mime, bytes: std::sync::Arc::new(bytes), proxy: None });
                         st.revision += 1;
                         self.canvas.key = None;
                         ctx.request_repaint();
@@ -1074,11 +1070,7 @@ impl VectorcraftApp {
                                 }
                                 for (key, blob) in &st.doc.images {
                                     if !blob.bytes.is_empty() {
-                                        g.push(CollabOutgoing::Blob {
-                                            key: key.clone(),
-                                            mime: blob.mime.clone(),
-                                            bytes: (*blob.bytes).clone(),
-                                        });
+                                        g.push(CollabOutgoing::Blob { key: key.clone(), mime: blob.mime.clone(), bytes: (*blob.bytes).clone() });
                                     }
                                 }
                             }
@@ -1640,23 +1632,13 @@ mod tests_collab {
         let rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1200.0, 800.0));
 
         let zooms = [0.0313, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 100.0, 640.0];
-        let centers = [
-            Point::new(0.0, 0.0),
-            Point::new(250.0, 350.0),
-            Point::new(-1000.0, 5000.0),
-            Point::new(10000.0, -10000.0),
-        ];
+        let centers = [Point::new(0.0, 0.0), Point::new(250.0, 350.0), Point::new(-1000.0, 5000.0), Point::new(10000.0, -10000.0)];
         let rotations = [0.0, 15.0, 45.0, 90.0, 180.0, 270.0];
 
         for &zoom in &zooms {
             for &center in &centers {
                 for &rotation in &rotations {
-                    let view = crate::state::View {
-                        zoom,
-                        center,
-                        rotation,
-                        ..Default::default()
-                    };
+                    let view = crate::state::View { zoom, center, rotation, ..Default::default() };
                     let xf = crate::canvas::Xf::new(rect, &view);
 
                     let screen_pos = xf.to_screen(doc_pt);
@@ -1673,12 +1655,7 @@ mod tests_collab {
                     assert_eq!(pts[0], screen_pos, "Arrow tip must be exactly at projected screen_pos");
 
                     let pan_delta = vectorcraft_geom::Vec2::new(50.0, -30.0);
-                    let panned_view = crate::state::View {
-                        zoom,
-                        center: center + pan_delta,
-                        rotation,
-                        ..Default::default()
-                    };
+                    let panned_view = crate::state::View { zoom, center: center + pan_delta, rotation, ..Default::default() };
                     let panned_xf = crate::canvas::Xf::new(rect, &panned_view);
                     let panned_screen_pos = panned_xf.to_screen(doc_pt);
 
@@ -1729,11 +1706,7 @@ mod tests_collab {
             let painter = ui.painter_at(rect);
             assert_eq!(painter.clip_rect(), rect, "painter_at must set clip_rect to canvas rect");
 
-            let view = crate::state::View {
-                zoom: 1.0,
-                center: Point::new(400.0, 300.0),
-                ..Default::default()
-            };
+            let view = crate::state::View { zoom: 1.0, center: Point::new(400.0, 300.0), ..Default::default() };
             let xf = crate::canvas::Xf::new(rect, &view);
             crate::canvas::paint_remote_cursors(&app, &painter, &xf);
         });

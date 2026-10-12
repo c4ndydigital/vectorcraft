@@ -183,12 +183,8 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
         let loc = win.location();
         let origin = loc.origin().unwrap_or_else(|_| "https://vector.c4ndy.com".to_string());
         let search = loc.search().unwrap_or_default();
-        let existing_room = search
-            .trim_start_matches('?')
-            .split('&')
-            .find_map(|p| p.strip_prefix("room="))
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
+        let existing_room =
+            search.trim_start_matches('?').split('&').find_map(|p| p.strip_prefix("room=")).filter(|s| !s.is_empty()).map(|s| s.to_string());
 
         let room_id = match existing_room {
             Some(r) => r,
@@ -605,11 +601,9 @@ fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws
         } else if let Some(txt) = data.as_string() {
             if let Ok(v) = vectorcraft_ui_egui::serde_json::from_str::<vectorcraft_ui_egui::serde_json::Value>(&txt) {
                 if v.get("type").and_then(|t| t.as_str()) == Some("blob") {
-                    if let (Some(key), Some(mime), Some(b64)) = (
-                        v.get("key").and_then(|k| k.as_str()),
-                        v.get("mime").and_then(|m| m.as_str()),
-                        v.get("dataBase64").and_then(|d| d.as_str()),
-                    ) {
+                    if let (Some(key), Some(mime), Some(b64)) =
+                        (v.get("key").and_then(|k| k.as_str()), v.get("mime").and_then(|m| m.as_str()), v.get("dataBase64").and_then(|d| d.as_str()))
+                    {
                         if let Some(bytes) = vectorcraft_format::base64_decode(b64) {
                             inbox_msg.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::Blob {
                                 key: key.to_string(),

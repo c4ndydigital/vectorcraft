@@ -37,23 +37,13 @@ pub struct LegalConfig {
 impl LegalConfig {
     pub fn from_env() -> Self {
         Self {
-            company_or_name: std::env::var("LEGAL_COMPANY")
-                .or_else(|_| std::env::var("LEGAL_NAME"))
-                .unwrap_or_default(),
+            company_or_name: std::env::var("LEGAL_COMPANY").or_else(|_| std::env::var("LEGAL_NAME")).unwrap_or_default(),
             address: std::env::var("LEGAL_ADDRESS").unwrap_or_default(),
             email: std::env::var("LEGAL_EMAIL").unwrap_or_default(),
             phone: std::env::var("LEGAL_PHONE").ok().filter(|s| !s.is_empty()),
-            register_court: std::env::var("LEGAL_REGISTER_COURT")
-                .or_else(|_| std::env::var("LEGAL_REGISTER"))
-                .ok()
-                .filter(|s| !s.is_empty()),
-            register_number: std::env::var("LEGAL_REGISTER_NUMBER")
-                .ok()
-                .filter(|s| !s.is_empty()),
-            vat_id: std::env::var("LEGAL_VAT_ID")
-                .or_else(|_| std::env::var("LEGAL_TAX_ID"))
-                .ok()
-                .filter(|s| !s.is_empty()),
+            register_court: std::env::var("LEGAL_REGISTER_COURT").or_else(|_| std::env::var("LEGAL_REGISTER")).ok().filter(|s| !s.is_empty()),
+            register_number: std::env::var("LEGAL_REGISTER_NUMBER").ok().filter(|s| !s.is_empty()),
+            vat_id: std::env::var("LEGAL_VAT_ID").or_else(|_| std::env::var("LEGAL_TAX_ID")).ok().filter(|s| !s.is_empty()),
         }
     }
 
@@ -72,42 +62,32 @@ impl UmamiConfig {
     pub fn from_env() -> Option<Self> {
         let script_url = std::env::var("UMAMI_SCRIPT_URL").ok()?;
         let website_id = std::env::var("UMAMI_WEBSITE_ID").ok()?;
-        if script_url.is_empty() || website_id.is_empty() {
-            None
-        } else {
-            Some(Self { script_url, website_id })
-        }
+        if script_url.is_empty() || website_id.is_empty() { None } else { Some(Self { script_url, website_id }) }
     }
 }
 
 /// Injects Umami analytics script tag before `</head>` if both env vars are present.
 pub fn inject_umami(html: &str, umami: Option<&UmamiConfig>) -> String {
     let Some(u) = umami else { return html.to_string() };
-    let script_tag = format!(
-        "  <script defer src=\"{}\" data-website-id=\"{}\"></script>\n</head>",
-        html_escape(&u.script_url),
-        html_escape(&u.website_id)
-    );
+    let script_tag =
+        format!("  <script defer src=\"{}\" data-website-id=\"{}\"></script>\n</head>", html_escape(&u.script_url), html_escape(&u.website_id));
     html.replace("</head>", &script_tag)
 }
 
 /// Renders HTML for `/impressum` with dark theme matching VectorCraft.
 pub fn render_impressum(config: &LegalConfig) -> String {
-    let company_name = if config.company_or_name.is_empty() {
-        "Dienstanbieter nicht konfiguriert (LEGAL_COMPANY fehlt)"
-    } else {
-        &config.company_or_name
-    };
+    let company_name =
+        if config.company_or_name.is_empty() { "Dienstanbieter nicht konfiguriert (LEGAL_COMPANY fehlt)" } else { &config.company_or_name };
 
-    let phone_row = if let Some(phone) = &config.phone {
-        format!("<p><strong>Telefon:</strong> {}</p>", html_escape(phone))
-    } else {
-        String::new()
-    };
+    let phone_row = if let Some(phone) = &config.phone { format!("<p><strong>Telefon:</strong> {}</p>", html_escape(phone)) } else { String::new() };
 
     let register_row = if let Some(court) = &config.register_court {
         let num = config.register_number.as_deref().unwrap_or("");
-        format!("<p><strong>Registereintrag:</strong> Eingetragen im Handelsregister.<br>Registergericht: {}<br>Registernummer: {}</p>", html_escape(court), html_escape(num))
+        format!(
+            "<p><strong>Registereintrag:</strong> Eingetragen im Handelsregister.<br>Registergericht: {}<br>Registernummer: {}</p>",
+            html_escape(court),
+            html_escape(num)
+        )
     } else {
         String::new()
     };
@@ -119,7 +99,7 @@ pub fn render_impressum(config: &LegalConfig) -> String {
     };
 
     format!(
-r#"<!DOCTYPE html>
+        r#"<!DOCTYPE html>
 <html lang="de">
 <head>
   <meta charset="utf-8">
@@ -182,15 +162,11 @@ r#"<!DOCTYPE html>
 
 /// Renders HTML for `/datenschutz` with dark theme matching VectorCraft.
 pub fn render_datenschutz(config: &LegalConfig, umami: Option<&UmamiConfig>) -> String {
-    let company_name = if config.company_or_name.is_empty() {
-        "Diensteanbieter (LEGAL_COMPANY nicht gesetzt)"
-    } else {
-        &config.company_or_name
-    };
+    let company_name = if config.company_or_name.is_empty() { "Diensteanbieter (LEGAL_COMPANY nicht gesetzt)" } else { &config.company_or_name };
 
     let umami_section = if let Some(u) = umami {
         format!(
-r#"<h2>Web-Analyse (Umami Analytics)</h2>
+            r#"<h2>Web-Analyse (Umami Analytics)</h2>
 <p>Diese Website verwendet die datenschutzfreundliche, selbst gehostete Open-Source-Webanalyse <strong>Umami</strong>.
 Umami setzt <em>keine Cookies</em>, speichert keine personenbezogenen Daten und verfolgt Nutzer nicht über verschiedene Websites hinweg.
 Alle Daten werden aggregiert verarbeitet, die IP-Adresse wird anonymisiert und nicht dauerhaft gespeichert.
@@ -203,7 +179,7 @@ Analyse-Host: <code>{}</code>.</p>"#,
     };
 
     format!(
-r#"<!DOCTYPE html>
+        r#"<!DOCTYPE html>
 <html lang="de">
 <head>
   <meta charset="utf-8">
@@ -297,12 +273,8 @@ pub struct ResourceMetrics {
 
 /// Reads Linux cgroup memory limits and current usage if available.
 pub fn read_cgroup_memory() -> (Option<u64>, Option<u64>) {
-    let used = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok());
-    let max = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok());
+    let used = std::fs::read_to_string("/sys/fs/cgroup/memory.current").ok().and_then(|s| s.trim().parse::<u64>().ok());
+    let max = std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok().and_then(|s| s.trim().parse::<u64>().ok());
     (used, max)
 }
 
@@ -366,10 +338,7 @@ impl AlertEvaluator {
             self.in_alert_state = false;
             self.last_alert_time = None;
             if self.send_recovery {
-                return Some(AlertEvent::Recovery {
-                    mem_percent: metrics.memory_percent,
-                    rooms_percent: metrics.rooms_percent,
-                });
+                return Some(AlertEvent::Recovery { mem_percent: metrics.memory_percent, rooms_percent: metrics.rooms_percent });
             }
         }
 
@@ -379,16 +348,8 @@ impl AlertEvaluator {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AlertEvent {
-    Critical {
-        mem_percent: f64,
-        rooms_percent: f64,
-        rooms_count: usize,
-        active_connections: usize,
-    },
-    Recovery {
-        mem_percent: f64,
-        rooms_percent: f64,
-    },
+    Critical { mem_percent: f64, rooms_percent: f64, rooms_count: usize, active_connections: usize },
+    Recovery { mem_percent: f64, rooms_percent: f64 },
 }
 
 impl AlertEvent {
@@ -479,10 +440,8 @@ mod tests {
     #[test]
     fn test_umami_injection() {
         let base_html = "<html><head><title>Test</title></head><body></body></html>";
-        let umami = UmamiConfig {
-            script_url: "https://example.com/script.js".to_string(),
-            website_id: "00000000-0000-0000-0000-000000000000".to_string(),
-        };
+        let umami =
+            UmamiConfig { script_url: "https://example.com/script.js".to_string(), website_id: "00000000-0000-0000-0000-000000000000".to_string() };
 
         let injected = inject_umami(base_html, Some(&umami));
         assert!(injected.contains("https://example.com/script.js"));
@@ -507,10 +466,8 @@ mod tests {
         assert!(!html_no_umami.contains("Umami"));
 
         // With Umami
-        let umami = UmamiConfig {
-            script_url: "https://example.com/umami.js".to_string(),
-            website_id: "00000000-0000-0000-0000-000000000000".to_string(),
-        };
+        let umami =
+            UmamiConfig { script_url: "https://example.com/umami.js".to_string(), website_id: "00000000-0000-0000-0000-000000000000".to_string() };
         let html_with_umami = render_datenschutz(&cfg, Some(&umami));
         assert!(html_with_umami.contains("Umami Analytics"));
         assert!(html_with_umami.contains("https://example.com/umami.js"));
@@ -521,13 +478,7 @@ mod tests {
         let mut evaluator = AlertEvaluator::new(80.0, 80.0, 60, true);
         let start = Instant::now();
 
-        let mut metrics = ResourceMetrics {
-            memory_percent: 85.0,
-            rooms_percent: 50.0,
-            rooms_count: 5,
-            active_connections: 10,
-            ..Default::default()
-        };
+        let mut metrics = ResourceMetrics { memory_percent: 85.0, rooms_percent: 50.0, rooms_count: 5, active_connections: 10, ..Default::default() };
 
         // Initial alert triggers
         let alert1 = evaluator.evaluate(&metrics, start);

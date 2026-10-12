@@ -12,11 +12,9 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path as AxumPath, Query, Request, State};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::http::header::{
-    AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderName, HeaderValue,
-};
+use axum::extract::{Path as AxumPath, Query, Request, State};
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{Next, from_fn};
 use axum::response::{Html, IntoResponse, Response};
@@ -26,9 +24,8 @@ use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use vectorcraft_server::{
-    AuthResult, LegalConfig, ResourceMetrics, UmamiConfig, check_bearer_auth,
-    inject_umami, read_cgroup_memory, read_process_rss, render_datenschutz, render_impressum,
-    REJECTED_BY_LIMIT_COUNT,
+    AuthResult, LegalConfig, REJECTED_BY_LIMIT_COUNT, ResourceMetrics, UmamiConfig, check_bearer_auth, inject_umami, read_cgroup_memory,
+    read_process_rss, render_datenschutz, render_impressum,
 };
 use yrs::updates::decoder::Decode;
 use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
@@ -80,33 +77,12 @@ pub struct ServerLimits {
 
 impl Default for ServerLimits {
     fn default() -> Self {
-        let room_grace_seconds = std::env::var("ROOM_GRACE_SECONDS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
-        let max_rooms = std::env::var("MAX_ROOMS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1000);
-        let max_clients_per_room = std::env::var("MAX_CLIENTS_PER_ROOM")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50);
-        let max_message_bytes = std::env::var("MAX_MESSAGE_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10 * 1024 * 1024); // 10 MB
-        let max_room_bytes = std::env::var("MAX_ROOM_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50 * 1024 * 1024); // 50 MB
-        Self {
-            room_grace_seconds,
-            max_rooms,
-            max_clients_per_room,
-            max_message_bytes,
-            max_room_bytes,
-        }
+        let room_grace_seconds = std::env::var("ROOM_GRACE_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+        let max_rooms = std::env::var("MAX_ROOMS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+        let max_clients_per_room = std::env::var("MAX_CLIENTS_PER_ROOM").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+        let max_message_bytes = std::env::var("MAX_MESSAGE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(10 * 1024 * 1024); // 10 MB
+        let max_room_bytes = std::env::var("MAX_ROOM_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(50 * 1024 * 1024); // 50 MB
+        Self { room_grace_seconds, max_rooms, max_clients_per_room, max_message_bytes, max_room_bytes }
     }
 }
 
@@ -209,11 +185,7 @@ impl AppState {
         let rooms = self.rooms.lock().unwrap_or_else(|e| e.into_inner());
         let rooms_count = rooms.len();
         let max_rooms = self.limits.max_rooms;
-        let rooms_percent = if max_rooms > 0 {
-            (rooms_count as f64 / max_rooms as f64) * 100.0
-        } else {
-            0.0
-        };
+        let rooms_percent = if max_rooms > 0 { (rooms_count as f64 / max_rooms as f64) * 100.0 } else { 0.0 };
         let active_connections = self.active_connections.load(Ordering::Relaxed);
         let largest_room_bytes = rooms.values().map(|r| r.estimated_bytes()).max().unwrap_or(0);
         let rejected_by_limit_count = REJECTED_BY_LIMIT_COUNT.load(Ordering::Relaxed);
@@ -340,27 +312,16 @@ async fn datenschutz_handler() -> impl IntoResponse {
     Html(html)
 }
 
-async fn metrics_or_status_handler(
-    headers: HeaderMap,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn metrics_or_status_handler(headers: HeaderMap, State(state): State<AppState>) -> impl IntoResponse {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     let expected_token = std::env::var("METRICS_TOKEN").ok();
     match check_bearer_auth(auth_header, expected_token.as_deref()) {
         AuthResult::Authorized => {
             let metrics = state.collect_metrics();
-            (
-                StatusCode::OK,
-                [(CONTENT_TYPE, "application/json")],
-                serde_json::to_string_pretty(&metrics).unwrap_or_default(),
-            ).into_response()
+            (StatusCode::OK, [(CONTENT_TYPE, "application/json")], serde_json::to_string_pretty(&metrics).unwrap_or_default()).into_response()
         }
-        AuthResult::Unauthorized => {
-            (StatusCode::UNAUTHORIZED, "Unauthorized\n").into_response()
-        }
-        AuthResult::Disabled => {
-            (StatusCode::NOT_FOUND, "Metrics endpoint disabled\n").into_response()
-        }
+        AuthResult::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized\n").into_response(),
+        AuthResult::Disabled => (StatusCode::NOT_FOUND, "Metrics endpoint disabled\n").into_response(),
     }
 }
 
@@ -382,11 +343,7 @@ async fn upload_blob_handler(
         return Err(StatusCode::INSUFFICIENT_STORAGE);
     }
 
-    let mime = headers
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/png")
-        .to_string();
+    let mime = headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("image/png").to_string();
 
     {
         let mut blobs = room.blobs.lock().unwrap_or_else(|e| e.into_inner());
@@ -410,10 +367,7 @@ async fn get_blob_handler(
     if let Ok(val) = HeaderValue::from_str(&mime) {
         response_headers.insert(CONTENT_TYPE, val);
     }
-    response_headers.insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=86400, immutable"),
-    );
+    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400, immutable"));
 
     Ok((StatusCode::OK, response_headers, bytes))
 }
@@ -430,20 +384,13 @@ async fn index_handler(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    Query(query): Query<WsQuery>,
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, StatusCode> {
+async fn ws_handler(ws: WebSocketUpgrade, Query(query): Query<WsQuery>, State(state): State<AppState>) -> Result<impl IntoResponse, StatusCode> {
     let room_id = query.room.unwrap_or_else(|| "default".to_string());
     let room = state.get_or_create_room(&room_id)?;
 
     if room.active_clients.load(Ordering::Relaxed) >= state.limits.max_clients_per_room {
         REJECTED_BY_LIMIT_COUNT.fetch_add(1, Ordering::Relaxed);
-        eprintln!(
-            "[server] rejection: room '{room_id}' reached max clients ({})",
-            state.limits.max_clients_per_room
-        );
+        eprintln!("[server] rejection: room '{room_id}' reached max clients ({})", state.limits.max_clients_per_room);
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
@@ -596,11 +543,7 @@ fn build_csp(umami: Option<&UmamiConfig>) -> String {
     } else {
         format!("script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' {extra}")
     };
-    let connect_src = if extra.is_empty() {
-        "connect-src 'self' ws: wss:".to_string()
-    } else {
-        format!("connect-src 'self' ws: wss: {extra}")
-    };
+    let connect_src = if extra.is_empty() { "connect-src 'self' ws: wss:".to_string() } else { format!("connect-src 'self' ws: wss: {extra}") };
 
     format!(
         "default-src 'self'; {script_src}; style-src 'self' 'unsafe-inline'; {connect_src}; img-src 'self' data: blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
@@ -618,29 +561,22 @@ async fn security_headers_middleware(req: Request, next: Next) -> Response {
     if let Ok(val) = HeaderValue::from_str(&csp) {
         headers.insert(CONTENT_SECURITY_POLICY, val);
     }
-    headers.insert(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static("strict-origin-when-cross-origin"),
-    );
-    headers.insert(
-        HeaderName::from_static("permissions-policy"),
-        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
-    );
+    headers.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
+    headers.insert(HeaderName::from_static("referrer-policy"), HeaderValue::from_static("strict-origin-when-cross-origin"));
+    headers.insert(HeaderName::from_static("permissions-policy"), HeaderValue::from_static("camera=(), microphone=(), geolocation=()"));
 
-    if path == "/" || path == "/index.html" || path.ends_with(".html") || path == "/health" || path == "/status" || path == "/metrics" || path == "/impressum" || path == "/datenschutz" {
-        headers.insert(
-            CACHE_CONTROL,
-            HeaderValue::from_static("no-cache, must-revalidate"),
-        );
+    if path == "/"
+        || path == "/index.html"
+        || path.ends_with(".html")
+        || path == "/health"
+        || path == "/status"
+        || path == "/metrics"
+        || path == "/impressum"
+        || path == "/datenschutz"
+    {
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache, must-revalidate"));
     } else if path.ends_with(".wasm") || path.ends_with(".js") || path.ends_with(".css") || path.ends_with(".svg") || path.ends_with(".ico") {
-        headers.insert(
-            CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=31536000, immutable"),
-        );
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
     }
 
     response
@@ -650,10 +586,7 @@ pub fn build_app(state: AppState, dist_path: &Path) -> Router {
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
     let compression = CompressionLayer::new();
 
-    let serve_dir = ServeDir::new(dist_path)
-        .append_index_html_on_directories(true)
-        .precompressed_br()
-        .precompressed_gzip();
+    let serve_dir = ServeDir::new(dist_path).append_index_html_on_directories(true).precompressed_br().precompressed_gzip();
 
     Router::new()
         .route("/", get(index_handler))
@@ -701,10 +634,7 @@ async fn main() -> ExitCode {
     if !config.dist.exists()
         && let Err(e) = std::fs::create_dir_all(&config.dist)
     {
-        eprintln!(
-            "vectorcraft-server: warning: could not create dist dir `{}`: {e}",
-            config.dist.display()
-        );
+        eprintln!("vectorcraft-server: warning: could not create dist dir `{}`: {e}", config.dist.display());
     }
 
     let addr_str = format!("{}:{}", config.bind, config.port);
@@ -761,11 +691,7 @@ mod tests {
 
     #[test]
     fn test_parse_cli_args_equals_syntax() {
-        let args = vec![
-            "--bind=192.0.2.1".to_string(),
-            "--port=8080".to_string(),
-            "--dist=custom/dist".to_string(),
-        ];
+        let args = vec!["--bind=192.0.2.1".to_string(), "--port=8080".to_string(), "--dist=custom/dist".to_string()];
         let cfg = parse_cli_args(&args).expect("valid args").expect("some config");
         assert_eq!(cfg.bind, "192.0.2.1");
         assert_eq!(cfg.port, 8080);

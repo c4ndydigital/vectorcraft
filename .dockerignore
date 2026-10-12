@@ -22,7 +22,6 @@ plan/
 # Documentation and assets not needed for compilation
 docs/
 examples/
-packaging/
 corpus/
 log/
 craft-fonts/

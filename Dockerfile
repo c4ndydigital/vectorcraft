@@ -39,6 +39,7 @@ COPY apps/ apps/
 COPY xtask/ xtask/
 COPY assets/ assets/
 COPY contributors/ contributors/
+COPY packaging/ packaging/
 
 # Build production WebAssembly client bundle into dist/web and precompress
 RUN cd apps/vectorcraft-web && trunk build --release --minify

@@ -1845,3 +1845,47 @@ mod tests_collab {
         out.textures_delta.clear();
     }
 }
+
+#[test]
+fn test_tab_isolation_and_teammate_badges() {
+    let app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Services::default());
+    // Peer on Tab 0
+    let peer_tab0 = PeerPresence {
+        client_id: 111,
+        name: "Tab0Designer".to_string(),
+        color: [255, 0, 0, 255],
+        cursor: Some(vectorcraft_geom::Point::new(100.0, 100.0)),
+        last_seen: 1.0,
+        active_tab: Some(0),
+    };
+    // Peer on Tab 1
+    let peer_tab1 = PeerPresence {
+        client_id: 222,
+        name: "Tab1Designer".to_string(),
+        color: [0, 255, 0, 255],
+        cursor: Some(vectorcraft_geom::Point::new(200.0, 200.0)),
+        last_seen: 1.0,
+        active_tab: Some(1),
+    };
+    app.remote_cursors.lock().unwrap().insert(111, peer_tab0);
+    app.remote_cursors.lock().unwrap().insert(222, peer_tab1);
+
+    // When local active tab is 0, peer_tab1 must NOT be shown
+    let cursors = app.remote_cursors.lock().unwrap();
+    let current_tab = Some(0);
+    let visible_to_local: Vec<u64> = cursors
+        .iter()
+        .filter(|&(id, p)| *id != app.collab_client_id && (p.active_tab.is_none() || p.active_tab == current_tab))
+        .map(|(&id, _)| id)
+        .collect();
+
+    assert_eq!(visible_to_local, vec![111], "Only peer on same tab (0) should be visible on canvas");
+
+    // Badges: peer on tab 1 must show up as badge on Tab 1
+    let tab1_badges: Vec<[u8; 4]> = cursors
+        .values()
+        .filter(|p| p.client_id != app.collab_client_id && p.active_tab == Some(1))
+        .map(|p| p.color)
+        .collect();
+    assert_eq!(tab1_badges, vec![[0, 255, 0, 255]], "Tab 1 badge must show peer 222's color");
+}

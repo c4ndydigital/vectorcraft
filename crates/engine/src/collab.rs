@@ -40,6 +40,7 @@ pub struct CrdtShape {
 pub struct CollabBridge {
     doc: Doc,
     shapes: MapRef,
+    meta: MapRef,
     known_shapes: HashSet<u64>,
 }
 
@@ -54,14 +55,16 @@ impl CollabBridge {
     pub fn new() -> Self {
         let doc = Doc::new();
         let shapes = doc.get_or_insert_map("shapes");
-        Self { doc, shapes, known_shapes: HashSet::new() }
+        let meta = doc.get_or_insert_map("meta");
+        Self { doc, shapes, meta, known_shapes: HashSet::new() }
     }
 
     /// Create a new collaboration bridge with an explicit client identifier.
     pub fn with_client_id(client_id: u64) -> Self {
         let doc = Doc::with_client_id(client_id);
         let shapes = doc.get_or_insert_map("shapes");
-        Self { doc, shapes, known_shapes: HashSet::new() }
+        let meta = doc.get_or_insert_map("meta");
+        Self { doc, shapes, meta, known_shapes: HashSet::new() }
     }
 
     /// Reference to the underlying CRDT document.
@@ -119,6 +122,11 @@ impl CollabBridge {
         for (key, shape) in shapes_to_sync {
             let serialized = serde_json::to_string(&shape).map_err(|e| CollabError::Serialization(e.to_string()))?;
             self.shapes.try_update(&mut txn, key, serialized);
+        }
+
+        // Synchronize document artboards (canvas dimensions)
+        if let Ok(artboards_json) = serde_json::to_string(&st.doc.artboards) {
+            self.meta.try_update(&mut txn, "artboards", artboards_json);
         }
 
         // Update local known shapes tracking
@@ -218,6 +226,17 @@ impl CollabBridge {
         self.known_shapes.clear();
         for id in &crdt_ids {
             self.known_shapes.insert(id.0);
+        }
+
+        // Synchronize remote document artboards (canvas dimensions)
+        if let Some(out) = self.meta.get(&txn, "artboards") {
+            if let Ok(json_str) = String::try_from(out) {
+                if let Ok(artboards) = serde_json::from_str::<Vec<vectorcraft_doc::Artboard>>(&json_str) {
+                    if !artboards.is_empty() && doc.artboards != artboards {
+                        doc.artboards = artboards;
+                    }
+                }
+            }
         }
 
         // Maintain document integrity

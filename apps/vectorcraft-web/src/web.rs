@@ -563,7 +563,6 @@ impl eframe::App for WebShell {
         if let Some(app) = &mut self.app {
             app.ui(ui);
         }
-        self.drain_collab_outbox();
     }
 }
 

@@ -124,3 +124,25 @@ fn test_crdt_export_update_snapshot() {
     assert_eq!(node_b.geometric_bounds(), Some(vectorcraft_geom::Rect::new(10.0, 20.0, 90.0, 70.0)));
     check_session(&session_b).expect("invariants on session_b");
 }
+
+#[test]
+fn test_crdt_artboard_dimension_sync() {
+    let session_a = session_with(1200.0, 900.0);
+    let mut session_b = session_with(800.0, 600.0);
+
+    let mut bridge_a = CollabBridge::with_client_id(301);
+    let mut bridge_b = CollabBridge::with_client_id(302);
+
+    // Initial artboard dimensions differ
+    assert_eq!(session_a.doc().unwrap().doc.artboards[0].rect.width(), 1200.0);
+    assert_eq!(session_b.doc().unwrap().doc.artboards[0].rect.width(), 800.0);
+
+    // Sync session_a (1200x900) to session_b
+    let update_a = bridge_a.sync_from_session(&session_a).expect("sync a");
+    bridge_b.apply_remote_update(&mut session_b, &update_a).expect("apply to b");
+
+    // Session B artboard dimensions must now match Session A
+    let artboard_b = &session_b.doc().unwrap().doc.artboards[0];
+    assert_eq!(artboard_b.rect.width(), 1200.0);
+    assert_eq!(artboard_b.rect.height(), 900.0);
+}

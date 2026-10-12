@@ -43,7 +43,9 @@ pub(crate) fn set_paint(ctx: &mut RenderContext, p: &Paint, bounds: Rect, f: &Fr
                     peniko::Gradient::new_linear(s, e).with_stops(stops.as_slice())
                 }
             };
-            ctx.set_paint(grad);
+            // Colour and opacity blend each on its own, as the model samples them and as the PDF
+            // and SVG exports draw them (peniko's default premultiplies).
+            ctx.set_paint(grad.with_interpolation_alpha_space(peniko::InterpolationAlphaSpace::Unpremultiplied));
             true
         }
         Paint::Pattern { pattern, xf } => crate::pattern::set_pattern_paint(ctx, pattern, *xf, f),
@@ -52,7 +54,22 @@ pub(crate) fn set_paint(ctx: &mut RenderContext, p: &Paint, bounds: Rect, f: &Fr
 
 /// Decode encoded image bytes into a premultiplied pixmap.
 pub fn decode_pixmap(bytes: &[u8]) -> Option<vello_cpu::Pixmap> {
-    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    pixmap_of(image::load_from_memory(bytes).ok()?.to_rgba8())
+}
+
+/// [`decode_pixmap`] shrunk to `w`×`h` pixels when the image is larger (never enlarged).
+pub fn decode_pixmap_fit(bytes: &[u8], w: u16, h: u16) -> Option<vello_cpu::Pixmap> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let img = if img.width() > w as u32 || img.height() > h as u32 {
+        img.resize_exact(w as u32, h as u32, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    pixmap_of(img.to_rgba8())
+}
+
+/// An RGBA image as a premultiplied pixmap.
+fn pixmap_of(img: image::RgbaImage) -> Option<vello_cpu::Pixmap> {
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 || w > u16::MAX as u32 || h > u16::MAX as u32 {
         return None;

@@ -56,6 +56,13 @@ fn edit_gradient_angle_reverse_and_errors() {
     s.execute("paint.editGradient", &json!({"stroke": false, "reverse": true})).unwrap();
     let Paint::Gradient(g) = node(&s, id).appearance.fill_paint() else { panic!() };
     assert_eq!(g.gradient.stops[0].color.to_hex(), "#000000");
+    // #1007: an off-centre midpoint is mirrored, not reset.
+    let stops = json!([{"offset": 0, "color": "#ff0000", "midpoint": 0.2}, {"offset": 1, "color": "#0000ff"}]);
+    s.execute("paint.editGradient", &json!({"stroke": false, "stops": stops})).unwrap();
+    s.execute("paint.editGradient", &json!({"stroke": false, "reverse": true})).unwrap();
+    let Paint::Gradient(g) = node(&s, id).appearance.fill_paint() else { panic!() };
+    assert_eq!(g.gradient.stops[0].color.to_hex(), "#0000ff");
+    assert!((g.gradient.stops[0].midpoint - 0.8).abs() < 1e-6, "{:?}", g.gradient.stops);
     assert!(s.execute("paint.editGradient", &json!({"stops": [{"offset": 0, "color": "#fff"}]})).is_err());
     assert!(s.execute("paint.editGradient", &json!({"kind": "conic"})).is_err());
 }
@@ -248,6 +255,16 @@ fn text_set_format() {
     let NodeKind::Text(t) = node(&s, id).kind else { panic!() };
     assert_eq!(t.first_style().kerning, None);
     assert!(s.execute("text.setFormat", &json!({"ids": [id.0]})).is_err());
+    // Paragraph composer: Every-line by default, undoable.
+    assert_eq!(t.para.composer, vectorcraft_doc::Composer::EveryLine);
+    s.execute("text.setFormat", &json!({"ids": [id.0], "composer": "singleLine"})).unwrap();
+    let NodeKind::Text(t) = node(&s, id).kind else { panic!() };
+    assert_eq!(t.para.composer, vectorcraft_doc::Composer::SingleLine);
+    assert!(s.execute("text.setFormat", &json!({"ids": [id.0], "composer": "best"})).is_err());
+    assert!(s.execute("text.setFormat", &json!({"ids": [id.0], "composer": 1})).is_err());
+    s.execute("edit.undo", &json!({})).unwrap();
+    let NodeKind::Text(t) = node(&s, id).kind else { panic!() };
+    assert_eq!(t.para.composer, vectorcraft_doc::Composer::EveryLine);
 }
 
 #[test]

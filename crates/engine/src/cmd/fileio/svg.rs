@@ -70,7 +70,7 @@ pub const OPTIONS: &[FormatOption] = &[
         name: "hiddenLayers",
         ty: "boolean",
         default: "false",
-        description: "keep hidden layers, not displayed (display:none); document.save sets it unless given",
+        description: "keep hidden layers and objects, not displayed (display=\"none\"); document.save sets it unless given",
     },
     FormatOption {
         name: "encoding",
@@ -153,7 +153,14 @@ pub(super) fn encode(doc: &Document, p: &Value, compressed: bool) -> Result<Enco
     let (opts, boards, chosen) = plan(doc, p)?;
     // Preserve editing embeds the native document (once, shared by every file).
     let native = opts.preserve_editing.then(|| vectorcraft_format::save(doc, false));
-    let mut enc = Encoded::default();
+    // Draw linked files as vectors when available, or their previews with a warning. Keep
+    // that preparation out of the native attachment so missing links remain relinkable.
+    let (full, warnings) = crate::cmd::place::document::full_documents(doc);
+    let doc = &*full;
+    // SVG has no filters for the Photoshop-style effects: their objects go in as images.
+    let flat = crate::cmd::rasterfx::flatten_pixel_effects(doc);
+    let doc = flat.as_ref().unwrap_or(doc);
+    let mut enc = Encoded { warnings, ..Encoded::default() };
     for artboard in boards {
         // A chosen artboard's file holds the art over it (#550).
         let over = artboard.filter(|_| chosen).and_then(|b| doc.artboards.get(b)).map(|a| super::export::art_over(doc, a.rect));

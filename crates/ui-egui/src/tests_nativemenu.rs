@@ -25,7 +25,7 @@ fn app(doc: bool) -> VectorcraftApp {
 }
 
 fn bar(app: &VectorcraftApp) -> MenuBar {
-    native_menu::mac_layout(&native_menu::from_tree(app, &menus::menu_tree()), Lang::EN).bar
+    native_menu::mac_layout(app, &native_menu::from_tree(app, &menus::menu_tree()), Lang::EN).bar
 }
 
 /// A level's nodes as short names: an item's command (`---` a separator, `[label]` a submenu,
@@ -182,8 +182,10 @@ fn every_in_window_item_is_in_the_mac_menu_bar_once() {
         assert_eq!(m, want, "{key:?} is listed {m} times on the Mac, {n} in the window");
     }
     let system = [native_menu::HIDE, native_menu::HIDE_OTHERS, native_menu::MINIMIZE];
+    // Language and Appearance have no in-window menu (synthesized in the App menu, as in PhotoCraft).
+    let synthesized = ["app.language", "window.brightness"];
     for key in b.keys() {
-        assert!(a.contains_key(key) || system.contains(&key.0.as_str()), "{key:?} isn't an in-window item");
+        assert!(a.contains_key(key) || system.contains(&key.0.as_str()) || synthesized.contains(&key.0.as_str()), "{key:?} isn't an in-window item");
     }
     let help = ids(menu(&mac, "Help"));
     assert!(help.contains(&"help.discord".to_string()) && !help.contains(&"help.about".to_string()), "{help:?}");
@@ -211,7 +213,7 @@ fn a_command_keeps_a_system_key_it_is_bound_to() {
     let mut app = app(true);
     app.ui.shortcut_overrides.insert("view.grid".into(), "Ctrl+Cmd+H".into());
     crate::shortcut_editor::sync(&app.ui);
-    let layout = native_menu::mac_layout(&native_menu::from_tree(&app, &menus::menu_tree()), Lang::EN);
+    let layout = native_menu::mac_layout(&app, &native_menu::from_tree(&app, &menus::menu_tree()), Lang::EN);
     app.ui.shortcut_overrides.clear();
     crate::shortcut_editor::sync(&app.ui);
     assert_eq!(find(&layout.bar, native_menu::HIDE).shortcut, None);
@@ -348,11 +350,18 @@ fn key_equivalents_run_through_the_normal_shortcut_path_once() {
     let before = undo(&m);
     m.key_equivalent("Cmd+Z");
     assert_eq!(undo(&m), before - 1, "⌘Z undid one step");
-    let synced = m.fake.synced();
-    assert!(synced >= 1, "the menus were built");
-    m.frame(vec![]);
-    m.frame(vec![]);
-    assert_eq!(m.fake.synced(), synced, "nothing changed: the menus weren't read again");
+    assert!(m.fake.synced() >= 1, "the menus were built");
+    // Idle frames don't read the menus again. The shortcut and plug-in generations are
+    // process-wide, and tests running alongside with other shortcuts bump them (rightly reading
+    // the menus again), so judge two idle frames in which they held still.
+    let globals = || (crate::shortcut_editor::GENERATION.load(std::sync::atomic::Ordering::Relaxed), crate::menus::plugin_revision());
+    let quiet = (0..50).any(|_| {
+        let (before, synced) = (globals(), m.fake.synced());
+        m.frame(vec![]);
+        m.frame(vec![]);
+        globals() == before && m.fake.synced() == synced
+    });
+    assert!(quiet, "nothing changed: the menus weren't read again");
     assert_eq!(crate::control::inspect(&m.app, &m.ctx)["nativeMenuBar"], json!(true));
 }
 
@@ -419,4 +428,59 @@ fn the_app_bar_hides_its_menus_with_the_mac_menu_bar() {
         let n = |t: &[String]| t.iter().filter(|s| s == title).count();
         assert_eq!(n(&native) + 1, n(&in_window), "{title}");
     }
+}
+
+/// While a file dialog's sheet is on the window the menu bar does nothing, as under the modal
+/// dialog before: every item is disabled but Hide, Hide Others and Minimize, a click that raced it
+/// isn't run (Minimize still is), and a key equivalent doesn't reach the app. Once the dialog
+/// answers, the menus are as before and work again.
+#[test]
+fn the_menu_bar_is_inert_while_a_file_dialog_is_open() {
+    let mut m = Mac::new(true);
+    m.app.services.dialogs_are_sheets = true;
+    let (shown, _) = crate::tests_picks::off_the_ui_thread(&mut m.app.services);
+    m.app.run("shape.rectangle", json!({"x": 200, "y": 150, "width": 20, "height": 20})).unwrap();
+    m.app.run("select.none", json!({})).unwrap();
+    m.frame(vec![]);
+    let rows = |bar: &MenuBar| bar.items().iter().map(|it| (it.command, it.params.clone(), it.enabled)).collect::<Vec<_>>();
+    let before = m.fake.last();
+    let system = [native_menu::HIDE, native_menu::HIDE_OTHERS, native_menu::MINIMIZE];
+    assert!(system.iter().all(|c| find(&before, c).enabled));
+    assert!(m.app.run("file.open", json!({})).is_err());
+    assert!(m.app.file_dialog_open());
+    m.frame(vec![]);
+    let inert = m.fake.last();
+    for it in inert.items() {
+        let kept = it.command.is_some_and(|c| system.contains(&c));
+        assert_eq!(it.enabled, kept, "{:?} {} while the dialog is open", it.command, it.label);
+    }
+    // A click that raced the menu going inert isn't run; Minimize is.
+    let rulers = (m.app.ui.view.rulers, find(&before, "view.rulers").clone());
+    m.fake.report(native_menu::Event::Click(rulers.1.clone()));
+    m.frame(vec![]);
+    assert_eq!(m.app.ui.view.rulers, rulers.0);
+    m.fake.report(native_menu::Event::Click(find(&inert, native_menu::MINIMIZE).clone()));
+    assert!(m.frame(vec![]).viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::Minimized(true)));
+    // A key equivalent that raced it doesn't reach egui.
+    let mut k = crate::shortcuts::parse("Cmd+A").unwrap();
+    k.modifiers.mac_cmd = k.modifiers.command;
+    m.fake.report(native_menu::Event::Key(k));
+    let mut raw = egui::RawInput::default();
+    m.app.raw_input_hook(&mut raw);
+    assert!(!raw.events.iter().any(|e| matches!(e, Event::Key { .. })), "{:?}", raw.events);
+    m.key_equivalent("Cmd+A");
+    assert_eq!(m.selected(), 0, "⌘A selected nothing");
+    // Cancelled: the menus are as before, and work again.
+    shown.answer(&[]);
+    m.frame(vec![]);
+    m.frame(vec![]);
+    assert!(!m.app.file_dialog_open());
+    // Every row from before is back as it was (tests running alongside may add plug-in rows).
+    let after = rows(&m.fake.last());
+    assert!(rows(&before).iter().all(|r| after.contains(r)), "the menus are as before");
+    m.fake.report(native_menu::Event::Click(rulers.1));
+    m.frame(vec![]);
+    assert_eq!(m.app.ui.view.rulers, !rulers.0);
+    m.key_equivalent("Cmd+A");
+    assert_eq!(m.selected(), 2, "⌘A selected every object");
 }

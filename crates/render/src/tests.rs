@@ -50,6 +50,50 @@ fn stroke_draws_outline_only() {
     assert_eq!(r.pixel(50, 50), [255, 255, 255, 255]);
 }
 
+/// #1396: a stroke wider than its ellipse is a solid blob, pixel for pixel the disc a renderer
+/// with a native stroke (the PDF and SVG exports) draws, at every alignment and zoom.
+#[test]
+fn a_stroke_wider_than_its_ellipse_paints_solid() {
+    let doc = |r: f64, fill: Paint, stroke: Paint, w: f64, align: StrokeAlign| {
+        let mut d = Document::new(100.0, 100.0);
+        let id = d.alloc_id();
+        let mut n = Node::path(id, shapes::ellipse(Rect::new(50.0 - r, 50.0 - r, 50.0 + r, 50.0 + r)), Appearance::basic(fill, stroke, w));
+        if let Some(st) = n.appearance.stroke_mut() {
+            st.align = align;
+        }
+        let l = d.layers[0].id;
+        d.insert(Some(l), 0, n).unwrap();
+        d
+    };
+    let black = || Paint::solid(Color::BLACK);
+    let render = |d: &Document, zoom: f64| {
+        let view = Affine::translate((50.0, 50.0)) * Affine::scale(zoom) * Affine::translate((-50.0, -50.0));
+        Renderer::new().render(d, 100, 100, view, &RenderOptions { background: Some([255, 255, 255, 255]), ..Default::default() })
+    };
+    // (ellipse radius, weight, alignment, radius of the disc it paints)
+    for (r, w, align, disc) in [
+        (10.0, 60.0, StrokeAlign::Center, 40.0),
+        (6.0, 50.0, StrokeAlign::Center, 31.0),
+        (15.0, 50.0, StrokeAlign::Center, 40.0),
+        (10.0, 30.0, StrokeAlign::Outside, 40.0),
+        (10.0, 30.0, StrokeAlign::Inside, 10.0),
+    ] {
+        for zoom in [0.5, 1.0, 2.0] {
+            let got = render(&doc(r, Paint::None, black(), w, align), zoom);
+            if align == StrokeAlign::Outside {
+                // The shape itself stays unpainted, and the stroke around it has no gap.
+                assert_eq!(got.pixel(50, 50), [255, 255, 255, 255], "{r} {w} {align:?} at {zoom}");
+                assert_eq!(got.pixel(50 + (12.0 * zoom) as u32, 50), [0, 0, 0, 255], "{r} {w} {align:?} at {zoom}");
+                continue;
+            }
+            let want = render(&doc(disc, black(), Paint::None, 0.0, StrokeAlign::Center), zoom);
+            let off =
+                (0..100).flat_map(|y| (0..100).map(move |x| (x, y))).filter(|&(x, y)| got.pixel(x, y)[0].abs_diff(want.pixel(x, y)[0]) > 40).count();
+            assert!(off <= 8, "{r} {w} {align:?} at {zoom}: {off} pixels differ from the disc");
+        }
+    }
+}
+
 #[test]
 fn inside_stroke_stays_inside() {
     let mut d = Document::new(100.0, 100.0);
@@ -221,7 +265,7 @@ fn masked_doc(clip: bool, invert: bool) -> Document {
     let art = Node::group(gid, vec![Arc::new(white), Arc::new(grey)]);
     let mut m = vectorcraft_doc::OpacityMask::new(art, clip);
     m.invert = invert;
-    n.mask = Some(Box::new(m));
+    n.extras_mut().mask = Some(Box::new(m));
     let l = d.layers[0].id;
     d.insert(Some(l), 0, n).unwrap();
     d
@@ -256,7 +300,7 @@ fn disabled_or_outline_mask_draws_unmasked() {
     let mut d = masked_doc(true, false);
     let id = d.layers[0].children().unwrap()[0].id;
     let n = d.node_mut(id).unwrap();
-    n.mask.as_mut().unwrap().disabled = true;
+    n.extras_mut().mask.as_mut().unwrap().disabled = true;
     let opts = RenderOptions { background: Some([255, 255, 255, 255]), ..Default::default() };
     let img = Renderer::new().render(&d, 100, 100, Affine::IDENTITY, &opts);
     assert_eq!(img.pixel(80, 50), [255, 0, 0, 255]);
@@ -361,4 +405,65 @@ fn invalid_dash_pattern_strokes_solid() {
         let img = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap_or_else(|_| panic!("rendering dash {pattern:?} did not finish"));
         assert_eq!(img.pixels, solid.pixels, "dash {pattern:?}");
     }
+}
+
+/// An image drawn larger than its pixels samples smoothly, or with `smooth_images` off each screen
+/// pixel takes its nearest image pixel (Pixel Preview with File Handling › Display Bitmaps as
+/// Anti-aliased Images off, #394).
+#[test]
+fn images_take_their_nearest_pixel_without_smoothing() {
+    use vectorcraft_doc::{ImageBlob, ImageObject, NodeKind};
+    let img = image::RgbaImage::from_fn(2, 1, |x, _| image::Rgba(if x == 0 { [0, 0, 0, 255] } else { [255, 255, 255, 255] }));
+    let mut png = vec![];
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let mut d = Document::new(40.0, 20.0);
+    d.images.insert("bw".into(), ImageBlob::new("image/png", png));
+    let id = d.alloc_id();
+    let im = ImageObject { key: "bw".into(), width: 2, height: 1, xf: Affine::scale(20.0), link: None, placement: Default::default() };
+    d.insert(Some(d.layers[0].id), 0, Node::new(id, NodeKind::Image(Box::new(im)))).unwrap();
+    // How many pixels across the image are neither black nor white.
+    let greys = |smooth_images| {
+        let r = Renderer::new().render(&d, 40, 20, Affine::IDENTITY, &RenderOptions { smooth_images, ..Default::default() });
+        (0..40).filter(|x| (16..240).contains(&r.pixel(*x, 10)[0])).count()
+    };
+    assert!(greys(true) >= 4, "smooth: a ramp from black to white");
+    assert_eq!(greys(false), 0, "nearest: black, then white");
+}
+
+/// Art Optimized exports are supersampled (#983): two red shapes meeting along a diagonal leave no
+/// seam of the white background between them, where shape-by-shape smoothing shows one; the outer
+/// edges stay smooth.
+#[test]
+fn supersampled_art_leaves_no_seam_between_shapes_that_meet() {
+    let red = || Paint::solid(Color::rgb(1.0, 0.0, 0.0));
+    let mut d = Document::new(100.0, 100.0);
+    let layer = d.layers[0].id;
+    // Two triangles sharing the diagonal of the square (10, 10)–(90, 90).
+    for pts in [[(10.0, 10.0), (90.0, 10.0), (90.0, 90.0)], [(10.0, 10.0), (90.0, 90.0), (10.0, 90.0)]] {
+        let mut b = vectorcraft_geom::BezPath::new();
+        b.move_to(pts[0]);
+        b.line_to(pts[1]);
+        b.line_to(pts[2]);
+        b.close_path();
+        let id = d.alloc_id();
+        d.insert(Some(layer), 0, Node::path(id, vectorcraft_geom::PathData::from_bezpath(&b), Appearance::basic(red(), Paint::None, 0.0))).unwrap();
+    }
+    let draw = |supersample: bool| {
+        let opts = RenderOptions { background: Some([255, 255, 255, 255]), precise: true, supersample, ..Default::default() };
+        Renderer::new().render(&d, 100, 100, Affine::IDENTITY, &opts)
+    };
+    // The palest pixel on the shared diagonal, away from the corners.
+    let palest = |r: &Rendered| (20..80).map(|i| r.pixel(i, i)[1].max(r.pixel(i + 1, i)[1])).max().unwrap();
+    assert!(palest(&draw(false)) > 20, "shape-by-shape smoothing shows the seam");
+    assert_eq!(palest(&draw(true)), 0, "supersampled: no seam");
+    // The outer edge is still smoothed: a pixel half covered is between white and red.
+    let ss = draw(true);
+    let edge = ss.pixel(50, 9);
+    assert!(edge == [255, 255, 255, 255] || (edge[1] > 0 && edge[1] < 255) || ss.pixel(50, 10)[1] < 255, "{edge:?}");
+    // The factor fits the size and the renderer's limits.
+    assert_eq!(supersample_factor(100, 100), Some(4));
+    assert_eq!(supersample_factor(2000, 2000), Some(3));
+    assert_eq!(supersample_factor(3000, 3000), Some(2));
+    assert_eq!(supersample_factor(5000, 5000), None);
+    assert_eq!(supersample_factor(40_000, 10), None);
 }

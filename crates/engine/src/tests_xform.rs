@@ -104,6 +104,37 @@ fn reflect_and_shear_tools() {
     assert!((b.width() - 150.0).abs() < 1e-6, "{b:?}");
 }
 
+/// Reflect and Shear return an error for an `axis` they don't take (Reflect's names it and also
+/// takes an angle): nothing moves and no undo step is recorded. A null `axis` counts as not given: Reflect
+/// then reflects across the vertical axis and Shear shears along the horizontal one.
+#[test]
+fn reflect_and_shear_reject_unknown_axes_without_changing_state() {
+    let mut s = session();
+    let a = rect(&mut s, 10.0, 20.0, 30.0, 10.0);
+    let n = undo_len(&s);
+    let reflect = "axis must be \"vertical\", \"horizontal\" or an angle in degrees";
+    let shear = "`axis` must be one of horizontal, vertical";
+    for (cmd, p, msg) in [
+        ("object.reflect", json!({"axis": "diagonal", "origin": [0, 0]}), format!("{reflect}, not `diagonal`")),
+        ("object.reflect", json!({"axis": "45", "origin": [0, 0]}), format!("{reflect}, not `45`")),
+        ("object.reflect", json!({"axis": true, "origin": [0, 0]}), format!("{reflect}, not `true`")),
+        ("object.shear", json!({"angle": 30, "axis": "diagonal"}), shear.to_string()),
+        ("object.shear", json!({"angle": 30, "axis": 90}), shear.to_string()),
+    ] {
+        let e = s.execute(cmd, &p).expect_err(&format!("{cmd} {p}"));
+        assert_eq!(e.to_string(), format!("invalid parameters for `{cmd}`: {msg}"));
+    }
+    assert!(close(bounds(&s, a), Rect::new(10.0, 20.0, 40.0, 30.0)), "nothing moved: {:?}", bounds(&s, a));
+    assert_eq!(undo_len(&s), n, "no undo step");
+    s.execute("object.reflect", &json!({"axis": null, "origin": [0, 0]})).unwrap();
+    assert!(close(bounds(&s, a), Rect::new(-40.0, 20.0, -10.0, 30.0)), "across the vertical axis: {:?}", bounds(&s, a));
+    s.execute("object.reflect", &json!({"axis": 0, "origin": [0, 0]})).unwrap();
+    assert!(close(bounds(&s, a), Rect::new(-40.0, -30.0, -10.0, -20.0)), "an angle still reflects: {:?}", bounds(&s, a));
+    s.execute("object.shear", &json!({"angle": 45, "axis": null, "origin": [0, 0]})).unwrap();
+    let b = bounds(&s, a);
+    assert!((b.y0 + 30.0).abs() < 1e-6 && (b.y1 + 20.0).abs() < 1e-6 && b.width() > 30.0, "along the horizontal axis: {b:?}");
+}
+
 #[test]
 fn distort_command_maps_corners() {
     let mut s = session();
@@ -247,12 +278,51 @@ fn artboard_tool_moves_with_art_creates_and_deletes() {
     assert_eq!(s.doc().unwrap().doc.artboards.len(), 2);
     assert_eq!(s.tool_options()["active"], 1);
     assert_eq!(s.doc().unwrap().doc.artboards[1].rect, Rect::new(1000.0, 0.0, 1200.0, 100.0));
-    // Delete it.
+    // Delete it: the tool takes the key ahead of the Clear shortcut (the UI only hands Delete to a
+    // tool that claims it).
+    assert!(s.tool_claims_key(ToolKey::Delete, ViewInfo::default()));
     s.tool_key(ToolKey::Delete, Mods::default(), ViewInfo::default()).unwrap();
     assert_eq!(s.doc().unwrap().doc.artboards.len(), 1);
-    // The last artboard can't be deleted.
+    // The last artboard can't be deleted, so Delete stays the shortcut's.
+    assert!(!s.tool_claims_key(ToolKey::Delete, ViewInfo::default()));
     s.tool_key(ToolKey::Delete, Mods::default(), ViewInfo::default()).unwrap();
     assert_eq!(s.doc().unwrap().doc.artboards.len(), 1);
+}
+
+#[test]
+fn artboard_drag_keeps_a_flush_background_with_roundoff_and_multiple_texts() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 600, "height": 400})).unwrap();
+    let (x, y) = (-35.23064566724116, -107.85371637852609);
+    s.execute("artboard.setProps", &json!({"index": 0, "x": x, "y": y})).unwrap();
+    // The background's top is 2.84e-14 pt above the artboard's top.
+    let background = rect(&mut s, x, -107.85371637852612, 600.0, 400.0);
+    let mut ids = vec![background];
+    for i in 0..3 {
+        let text = s.execute("text.create", &json!({"x": x + 100.0, "y": y + 80.0 + f64::from(i) * 60.0, "text": "Test", "size": 12})).unwrap();
+        ids.push(NodeId(text["id"].as_u64().unwrap()));
+    }
+    s.execute("select.none", &json!({})).unwrap();
+    let before: Vec<Rect> = ids.iter().map(|id| bounds(&s, *id)).collect();
+    let board = s.doc().unwrap().doc.artboards[0].rect;
+    let history = undo_len(&s);
+    gesture(&mut s, "artboard", &[(x + 300.0, y + 200.0), (x + 400.0, y + 240.0), (x + 400.0, y + 240.0)], Mods::default());
+    let moved_board = s.doc().unwrap().doc.artboards[0].rect;
+    let delta = moved_board.origin() - board.origin();
+    assert!(delta.hypot() > 1.0, "the artboard actually moved");
+    for (id, was) in ids.iter().zip(&before) {
+        assert!(close(bounds(&s, *id), *was + delta), "{id:?} must move with the artboard");
+    }
+    assert_eq!(undo_len(&s), history + 1);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().doc.artboards[0].rect, board);
+    for (id, was) in ids.iter().zip(&before) {
+        assert!(close(bounds(&s, *id), *was), "Undo restores {id:?}");
+    }
+    s.execute("edit.redo", &json!({})).unwrap();
+    for (id, was) in ids.iter().zip(&before) {
+        assert!(close(bounds(&s, *id), *was + delta), "Redo moves {id:?}");
+    }
 }
 
 #[test]
@@ -311,6 +381,152 @@ fn artboard_move_copy_reports_the_copies_and_follows_move_art() {
     assert_eq!(d.artboards[2].name, "Artboard 1 copy 2", "a name of its own");
     let ids: std::collections::HashSet<u32> = d.artboards.iter().map(|a| a.id).collect();
     assert_eq!(ids.len(), 3, "every artboard has an id of its own");
+}
+
+fn stroke_width(s: &Session, id: NodeId) -> f64 {
+    s.doc().unwrap().doc.node(id).unwrap().appearance.stroke().unwrap().width
+}
+
+fn guide_positions(s: &Session) -> Vec<f64> {
+    s.doc().unwrap().doc.guides.iter().map(|g| g.pos).collect()
+}
+
+/// Scale Artwork with Artboard (#602): `artboard.setProps {scaleArt}` takes the art fully inside the
+/// artboard and its guides from the old rectangle onto the new one, each side by its own ratio, in
+/// one undo step; art partly outside and canvas guides stay.
+#[test]
+fn artboard_set_props_scales_the_art_and_guides_with_the_artboard() {
+    let mut s = session();
+    let inside = rect(&mut s, 100.0, 100.0, 200.0, 100.0);
+    s.execute("stroke.set", &json!({"weight": 4})).unwrap();
+    let partly = rect(&mut s, 700.0, 500.0, 200.0, 200.0);
+    for (vertical, pos, artboard) in [(true, 400.0, json!(0)), (false, 300.0, json!(0)), (true, 400.0, json!(null))] {
+        s.execute("guide.add", &json!({"vertical": vertical, "pos": pos, "artboard": artboard})).unwrap();
+    }
+    let before = s.doc().unwrap().doc.clone();
+    // Half the size: half the art, half the stroke (Scale Strokes & Effects).
+    let out = s.execute("artboard.setProps", &json!({"index": 0, "width": 400, "height": 300, "scaleArt": true, "strokes": true})).unwrap();
+    assert_eq!(out["scaled"], json!([inside.0]));
+    assert_eq!(s.doc().unwrap().doc.artboards[0].rect, Rect::new(0.0, 0.0, 400.0, 300.0));
+    assert_eq!(bounds(&s, inside), Rect::new(50.0, 50.0, 150.0, 100.0));
+    assert_eq!(stroke_width(&s, inside), 2.0);
+    assert_eq!(bounds(&s, partly), Rect::new(700.0, 500.0, 900.0, 700.0), "art partly outside stays");
+    assert_eq!(guide_positions(&s), vec![200.0, 150.0, 400.0], "the artboard's guides scale, the canvas guide stays");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(*s.doc().unwrap().doc, *before, "one undo step");
+    // Moved and stretched (left edge to -100, twice as wide), strokes kept: the art follows.
+    s.execute("artboard.setProps", &json!({"index": 0, "x": -100, "width": 1600, "scaleArt": true, "strokes": false})).unwrap();
+    assert_eq!(bounds(&s, inside), Rect::new(100.0, 100.0, 500.0, 200.0));
+    assert_eq!(stroke_width(&s, inside), 4.0);
+    assert_eq!(guide_positions(&s), vec![700.0, 300.0, 400.0]);
+}
+
+/// Without `scaleArt` a resize leaves the art and guides alone (and returns nothing, as before);
+/// with it, a pure move scales nothing (guides move along, as they always have).
+#[test]
+fn artboard_set_props_scales_art_only_when_asked_and_resized() {
+    let mut s = session();
+    let r = rect(&mut s, 100.0, 100.0, 200.0, 100.0);
+    s.execute("guide.add", &json!({"vertical": true, "pos": 400, "artboard": 0})).unwrap();
+    assert_eq!(s.execute("artboard.setProps", &json!({"index": 0, "width": 400})).unwrap(), Value::Null);
+    assert_eq!(bounds(&s, r), Rect::new(100.0, 100.0, 300.0, 200.0));
+    assert_eq!(guide_positions(&s), vec![400.0]);
+    let out = s.execute("artboard.setProps", &json!({"index": 0, "x": 50, "scaleArt": true})).unwrap();
+    assert_eq!(out["scaled"], json!([]));
+    assert_eq!(bounds(&s, r), Rect::new(100.0, 100.0, 300.0, 200.0));
+    assert_eq!(guide_positions(&s), vec![450.0]);
+    assert!(s.execute("artboard.setProps", &json!({"index": 9, "width": 10, "scaleArt": true})).is_err());
+}
+
+/// Move Artwork is independent of scaling and takes only fully contained art and board guides.
+#[test]
+fn coordinate_moves_honor_move_art_and_keep_resize_behavior() {
+    let mut s = session();
+    let inside = rect(&mut s, 100.0, 100.0, 200.0, 100.0);
+    s.execute("stroke.set", &json!({"weight": 4})).unwrap();
+    let partly = rect(&mut s, 700.0, 500.0, 200.0, 200.0);
+    s.execute("guide.add", &json!({"vertical": true, "pos": 400, "artboard": 0})).unwrap();
+    s.execute("guide.add", &json!({"vertical": true, "pos": 400})).unwrap();
+    let before = s.doc().unwrap().doc.clone();
+    for scale in [false, true] {
+        let out = s.execute("artboard.setProps", &json!({"index": 0, "x": 30, "y": -10, "moveArt": true, "scaleArt": scale})).unwrap();
+        assert_eq!(bounds(&s, inside), Rect::new(130.0, 90.0, 330.0, 190.0));
+        assert_eq!(bounds(&s, partly), Rect::new(700.0, 500.0, 900.0, 700.0));
+        assert_eq!(stroke_width(&s, inside), 4.0);
+        assert_eq!(guide_positions(&s), vec![430.0, 400.0]);
+        assert_eq!(out, if scale { json!({"scaled": []}) } else { Value::Null });
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(*s.doc().unwrap().doc, *before);
+    }
+    for p in [json!({"index": 0, "x": 30, "moveArt": false}), json!({"index": 0, "x": 30, "width": 400, "moveArt": true})] {
+        s.execute("artboard.setProps", &p).unwrap();
+        assert_eq!(bounds(&s, inside), Rect::new(100.0, 100.0, 300.0, 200.0));
+        s.execute("edit.undo", &json!({})).unwrap();
+    }
+}
+
+#[test]
+fn coordinate_moves_journal_the_locked_art_preference() {
+    let mut s = session();
+    let locked = rect(&mut s, 100.0, 100.0, 200.0, 100.0);
+    s.execute("object.lock", &json!({})).unwrap();
+    s.execute("artboard.setProps", &json!({"index": 0, "x": 30, "moveArt": true})).unwrap();
+    assert_eq!(bounds(&s, locked), Rect::new(100.0, 100.0, 300.0, 200.0));
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.prefs.move_locked_with_artboard = true;
+    s.execute("artboard.setProps", &json!({"index": 0, "x": 30, "moveArt": true})).unwrap();
+    assert_eq!(bounds(&s, locked), Rect::new(130.0, 100.0, 330.0, 200.0));
+    let (id, p) = s.journal.last().unwrap().clone();
+    assert_eq!(p["lockedAndHidden"], true);
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.prefs.move_locked_with_artboard = false;
+    s.execute(&id, &p).unwrap();
+    assert_eq!(bounds(&s, locked), Rect::new(130.0, 100.0, 330.0, 200.0));
+}
+
+/// Locked and hidden art scales only with Move Locked and Hidden Artwork with Artboard, as it
+/// moves only with it.
+#[test]
+fn scale_artwork_with_artboard_leaves_locked_art_unless_the_preference_says() {
+    let mut s = session();
+    let locked = rect(&mut s, 100.0, 100.0, 200.0, 100.0);
+    s.execute("object.lock", &json!({})).unwrap();
+    let scaled = |s: &mut Session| {
+        let out = s.execute("artboard.setProps", &json!({"index": 0, "width": 400, "height": 300, "scaleArt": true})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        out["scaled"].clone()
+    };
+    assert_eq!(scaled(&mut s), json!([]));
+    s.execute("prefs.set", &json!({"key": "moveLockedWithArtboard", "value": true})).unwrap();
+    assert_eq!(scaled(&mut s), json!([locked.0]));
+    // The choice is journaled: replayed with the preference off, the same art scales.
+    s.execute("artboard.setProps", &json!({"index": 0, "width": 400, "height": 300, "scaleArt": true})).unwrap();
+    assert_eq!(s.journal.last().unwrap().1["lockedAndHidden"], true);
+    let (id, p) = s.journal.last().unwrap().clone();
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("prefs.set", &json!({"key": "moveLockedWithArtboard", "value": false})).unwrap();
+    assert_eq!(s.execute(&id, &p).unwrap()["scaled"], json!([locked.0]));
+}
+
+/// The Artboard tool with its `scaleArt` option on resizes proportionally and the art scales with
+/// the artboard, in one undo step.
+#[test]
+fn artboard_tool_scales_art_with_the_artboard() {
+    let mut s = session();
+    let r = rect(&mut s, 100.0, 100.0, 200.0, 100.0);
+    let before = s.doc().unwrap().doc.clone();
+    s.set_tool_options(Some("artboard"), json!({"scaleArt": true}).as_object().unwrap());
+    // The right handle 100 pt out: 9/8 as wide, and as tall about the middle of the left side.
+    gesture(&mut s, "artboard", &[(800.0, 300.0), (850.0, 300.0), (900.0, 300.0), (900.0, 300.0)], Mods::default());
+    assert_eq!(s.doc().unwrap().doc.artboards[0].rect, Rect::new(0.0, -37.5, 900.0, 637.5));
+    assert_eq!(bounds(&s, r), Rect::new(112.5, 75.0, 337.5, 187.5));
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(*s.doc().unwrap().doc, *before, "one undo step");
+    // Off again (the option is remembered like Move Artwork with Artboard): the art stays.
+    s.set_tool_options(Some("artboard"), json!({"scaleArt": false}).as_object().unwrap());
+    gesture(&mut s, "artboard", &[(800.0, 300.0), (850.0, 300.0), (900.0, 300.0), (900.0, 300.0)], Mods::default());
+    assert_eq!(s.doc().unwrap().doc.artboards[0].rect, Rect::new(0.0, 0.0, 900.0, 600.0));
+    assert_eq!(bounds(&s, r), Rect::new(100.0, 100.0, 300.0, 200.0));
 }
 
 #[test]
@@ -422,4 +638,57 @@ fn copy_from_requires_source() {
     let mut s = session();
     assert!(s.execute("appearance.copyFrom", &json!({})).is_err());
     assert!(s.execute("appearance.copyFrom", &json!({"source": 9999})).is_err());
+}
+
+#[test]
+fn distort_rejects_malformed_coordinates_and_ids_without_editing_art() {
+    let mut s = session();
+    let a = rect(&mut s, 0.0, 0.0, 100.0, 100.0);
+    let original = bounds(&s, a);
+    let history = undo_len(&s);
+    let corners = json!([[10, 0], [90, 0], [100, 100], [0, 100]]);
+    for p in [
+        json!({"corners": [[10, 0, 50], [90, 0], [100, 100], [0, 100]]}),
+        json!({"corners": [[10, 0], [90, 0], ["bad", 100], [0, 100]]}),
+        json!({"corners": [[10, 0], [90, 0], [100, 100], [0, 100], ["bad"]]}),
+        json!({"corners": corners, "from": [0, 0, 100]}),
+        json!({"corners": corners, "from": "not bounds"}),
+        json!({"corners": corners, "ids": [a.0, "bad"]}),
+        json!({"corners": corners, "ids": [a.0, u64::MAX]}),
+    ] {
+        assert!(s.execute("object.distort", &p).is_err(), "invalid input: {p}");
+        assert!(close(bounds(&s, a), original));
+        assert_eq!(undo_len(&s), history);
+    }
+    s.execute("object.distort", &json!({"corners": corners, "from": [0, 0, 100, 100], "ids": [a.0]})).unwrap();
+    assert_eq!(undo_len(&s), history + 1);
+}
+
+/// `artboard.move` and `artboard.delete` take several artboards at once (#1139): one undo step
+/// each, the art on each moving with it, and one artboard always left.
+#[test]
+fn several_artboards_move_and_delete_together() {
+    let mut s = session();
+    s.execute("artboard.new", &json!({"x": 1000, "y": 0, "width": 200, "height": 200})).unwrap();
+    s.execute("artboard.new", &json!({"x": 1400, "y": 0, "width": 200, "height": 200})).unwrap();
+    let r = rect(&mut s, 1050.0, 50.0, 50.0, 50.0);
+    let before: Vec<Rect> = s.doc().unwrap().doc.artboards.iter().map(|a| a.rect).collect();
+    let out = s.execute("artboard.move", &json!({"indices": [2, 1], "dx": 10, "dy": 20, "moveArt": true})).unwrap();
+    assert_eq!(out["indices"], json!([1, 2]));
+    let d = &s.doc().unwrap().doc;
+    assert_eq!(d.artboards[0].rect, before[0]);
+    assert_eq!(
+        (d.artboards[1].rect, d.artboards[2].rect),
+        (before[1] + vectorcraft_geom::Vec2::new(10.0, 20.0), before[2] + vectorcraft_geom::Vec2::new(10.0, 20.0))
+    );
+    assert_eq!(d.node(r).unwrap().geometric_bounds().unwrap().x0, 1060.0, "the art on artboard 2 moved with it");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().doc.artboards[2].rect, before[2], "one undo step");
+    for bad in [json!({"indices": [1, 9]}), json!({"indices": []}), json!({"indices": [-1]}), json!({"indices": "1"})] {
+        assert!(s.execute("artboard.move", &json!({"indices": bad["indices"], "dx": 1})).is_err(), "{bad}");
+    }
+    assert!(s.execute("artboard.delete", &json!({"indices": [0, 1, 2]})).is_err(), "one is always left");
+    s.execute("artboard.delete", &json!({"indices": [2, 0]})).unwrap();
+    let d = &s.doc().unwrap().doc;
+    assert_eq!(d.artboards.iter().map(|a| a.rect).collect::<Vec<_>>(), [before[1]]);
 }

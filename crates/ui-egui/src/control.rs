@@ -14,8 +14,10 @@
 //!   real egui pointer input in screen points (reaches every widget: panels, flyouts, dialogs)
 //! - `ui.set {brightness?, panel?, dockTab?, rulers?, outline?, …}`
 //! - `ui.dialog.set {field, value}` / `ui.dialog.confirm` / `ui.dialog.cancel`
-//! - `ui.resize {width, height}`, `ui.focus`, `ui.screenshot {path?}`
-//! - `ui.render {path?, scale?}`: render the active artboard headlessly (PNG)
+//! - `ui.resize {width, height}`, `ui.focus`, `ui.screenshot {path?, data?}` (`data: true`: the PNG
+//!   comes back as `pngBase64` as well)
+//! - `ui.render {path?, scale?, artboard?, data?}`: render an artboard headlessly (`artboard`: its
+//!   0-based index, default the first; PNG; without a path, or with `data: true`, as `pngBase64`)
 //! - `app.open {path}` (any readable format) / `app.save {path?, svg?: {…SVG options}}` / `app.quit`
 //!   (`file.close`, `file.closeAll` and `app.quit` first open a `saveChanges` dialog for each
 //!   modified document: `ui.dialog.confirm` saves, set `discard: true` then confirm to discard)
@@ -47,7 +49,12 @@ impl ControlRequest {
 
 pub enum Outcome {
     Done(Value),
-    Screenshot { path: Option<String> },
+    /// A window capture, answered once a frame was presented: written to `path`, the PNG sent
+    /// back too with `data`.
+    Screenshot {
+        path: Option<String>,
+        data: bool,
+    },
 }
 
 fn ok(v: Value) -> Outcome {
@@ -84,6 +91,8 @@ pub fn inspect(app: &VectorcraftApp, ctx: &egui::Context) -> Value {
             "pinned": app.ui.task_bar_place.pinned,
             "rect": crate::canvas::task_bar_rect(ctx).map(|r| json!([r.left(), r.top(), r.width(), r.height()])),
         },
+        // The Free Transform tool's widget, where it shows.
+        "freeTransformWidget": crate::free_transform::rect(ctx).map(|r| json!([r.left(), r.top(), r.width(), r.height()])),
         "view": app.view().map(|v| serde_json::to_value(v).unwrap_or_default()),
         "canvasRect": app.canvas_rect.map(|c| json!([c.left(), c.top(), c.width(), c.height()])),
         "window": [r.width(), r.height()],
@@ -95,6 +104,11 @@ pub fn inspect(app: &VectorcraftApp, ctx: &egui::Context) -> Value {
         "nativeMenuBar": app.services.native_menu.is_some(),
         // Saves and exports still being written in the background (Background Save / Export).
         "background": app.background.jobs.iter().map(|j| j.label.as_str()).collect::<Vec<_>>(),
+        // Documents still being read off the UI thread (File › Open, Open Recent): their paths.
+        "opening": app.opening.pending.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+        // A native file dialog open off the UI thread (`open`, `place`, `save`, `folder`), waiting
+        // for the person at the computer: what asked for it runs again when it answers.
+        "fileDialog": app.picks.waiting_kind(),
     })
 }
 
@@ -171,7 +185,7 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context, req: &ControlReques
                 }
             }
             ctx.request_repaint();
-            wrap(app.run("document.inspect", json!({})).map(|d| json!({"selection": d["selection"], "tool": app.session.tool_id()})))
+            wrap(app.run("document.inspect", json!({})).map(|d| json!({"selection": d["selection"], "key": d["key"], "tool": app.session.tool_id()})))
         }
         "ui.key" => {
             let Some(k) = s("key").and_then(key_from) else { return err("unknown or missing `key`") };
@@ -299,16 +313,22 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context, req: &ControlReques
             ok(Value::Null)
         }
         "ui.screenshot" => {
+            // Refused now rather than once the frame comes (it is checked again then).
+            if let Some(Err(e)) = s("path").map(vectorcraft_engine::file_access::check_write) {
+                return err(e);
+            }
             if p.get("focus").and_then(Value::as_bool).unwrap_or(true) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
             ctx.request_repaint();
-            Outcome::Screenshot { path: s("path").map(str::to_string) }
+            Outcome::Screenshot { path: s("path").map(str::to_string), data: p.get("data").and_then(Value::as_bool) == Some(true) }
         }
         "ui.render" => {
             let Some(st) = app.session.active() else { return err("no document") };
             let doc = st.doc.clone();
-            let Some(r) = doc.artboards.first().map(|a| a.rect) else { return err("no artboard") };
+            // The artboard asked for (0-based, as headless), else the first.
+            let index = p.get("artboard").and_then(Value::as_u64).map_or(Some(0), |i| usize::try_from(i).ok());
+            let Some(r) = index.and_then(|i| doc.artboards.get(i)).map(|a| a.rect) else { return err("no such artboard") };
             let scale = p.get("scale").and_then(Value::as_f64).unwrap_or(1.0);
             if let Err(e) = vectorcraft_render::raster_size(r, scale) {
                 return err(e);
@@ -318,12 +338,16 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context, req: &ControlReques
                 Ok(png) => png,
                 Err(e) => return err(e),
             };
+            let data = p.get("data").and_then(Value::as_bool) == Some(true);
             match s("path") {
                 Some(path) => match app.services.write.as_mut() {
-                    Some(w) => wrap(w(path, &png).map(|_| json!({"path": path, "width": img.width, "height": img.height}))),
+                    Some(w) => wrap(
+                        w(path, &png)
+                            .map(|_| with_data(json!({"path": path, "width": img.width, "height": img.height}), data.then_some(png.as_slice()))),
+                    ),
                     None => err("no writer"),
                 },
-                None => ok(json!({"width": img.width, "height": img.height, "pngBase64": vectorcraft_format::base64_encode(&png)})),
+                None => ok(with_data(json!({"width": img.width, "height": img.height}), Some(&png))),
             }
         }
         "app.open" => wrap(app.run("file.open", json!({"path": s("path")}))),
@@ -333,30 +357,104 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context, req: &ControlReques
             // No save dialog for an agent: the bytes come back, as in headless mode.
             None => wrap(app.run("document.export", p.clone())),
         },
-        "app.quit" => {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            ok(Value::Null)
-        }
+        // As the menu's Quit: `{"pending": "saveChanges"}` while a modified document is asked
+        // about; otherwise null, and the host closes the window (#830).
+        "app.quit" => wrap(app.run("app.quit", json!({}))),
         other => err(format!("unknown method `{other}`")),
     }
 }
 
-pub fn save_screenshot(app: &mut VectorcraftApp, image: &egui::ColorImage, path: Option<&str>) -> Value {
+/// `result` with the PNG as `pngBase64` when there is one.
+fn with_data(mut result: Value, png: Option<&[u8]>) -> Value {
+    if let Some(png) = png {
+        result["pngBase64"] = json!(vectorcraft_format::base64_encode(png));
+    }
+    result
+}
+
+/// The reply to `ui.screenshot`: the window capture `image` written to `path`, and sent back as
+/// `pngBase64` with `data`.
+pub fn save_screenshot(app: &mut VectorcraftApp, image: &egui::ColorImage, path: Option<&str>, data: bool) -> Value {
     let [w, h] = image.size;
-    let Some(path) = path else {
+    if path.is_none() && !data {
         return json!({"ok": true, "result": {"width": w, "height": h}});
-    };
+    }
     let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
     let img = vectorcraft_render::Rendered { width: w as u32, height: h as u32, pixels: rgba };
     let png = match img.to_png() {
         Ok(png) => png,
         Err(e) => return json!({"ok": false, "error": e}),
     };
+    let data = data.then_some(png.as_slice());
+    let Some(path) = path else {
+        return json!({"ok": true, "result": with_data(json!({"width": w, "height": h}), data)});
+    };
     match app.services.write.as_mut() {
         Some(wr) => match wr(path, &png) {
-            Ok(()) => json!({"ok": true, "result": {"path": path, "width": w, "height": h}}),
+            Ok(()) => json!({"ok": true, "result": with_data(json!({"path": path, "width": w, "height": h}), data)}),
             Err(e) => json!({"ok": false, "error": e}),
         },
         None => json!({"ok": false, "error": "no writer configured"}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+    use vectorcraft_engine::Session;
+
+    use super::{ControlRequest, Outcome, handle};
+    use crate::{Services, VectorcraftApp};
+
+    /// #1004: `ui.render` (the MCP `screenshot` of a connected app) renders the artboard asked
+    /// for, at the scale asked for; the first without one.
+    #[test]
+    fn render_takes_the_artboard_asked_for() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = VectorcraftApp::new(Session::new(), Services::default()).with_control(rx);
+        let mut request = |method: &str, params: Value| {
+            let (req, reply) = ControlRequest::new(method, params);
+            tx.send(req).unwrap();
+            app.drain_control(&egui::Context::default());
+            reply.try_recv().unwrap()
+        };
+        let new = json!({"width": 64, "height": 64, "units": "Points", "artboards": 2});
+        request("engine.execute", json!({"command": "file.new", "params": new}));
+        let board = json!({"index": 1, "x": 100, "y": 0, "width": 96, "height": 48});
+        let r = request("engine.execute", json!({"command": "artboard.setProps", "params": board}));
+        assert_eq!(r["ok"], true, "{r}");
+        for (params, size) in [
+            (json!({}), [64, 64]),
+            (json!({"artboard": 0}), [64, 64]),
+            (json!({"artboard": 1}), [96, 48]),
+            (json!({"artboard": 1, "scale": 0.5}), [48, 24]),
+        ] {
+            let r = request("ui.render", params.clone());
+            let got = [&r["result"]["width"], &r["result"]["height"]].map(Value::as_u64);
+            assert_eq!(got, size.map(Some), "{params}: {r}");
+        }
+        assert!(request("ui.render", json!({"artboard": 2}))["error"].is_string());
+    }
+
+    /// `ui.pointer` replies with the key object: a click on one of two selected objects makes it
+    /// the key, and a click on the key again lets it go.
+    #[test]
+    fn pointer_replies_name_the_key_object() {
+        let mut app = VectorcraftApp::new(Session::new(), Services::default());
+        app.run("file.new", json!({"width": 200, "height": 200})).unwrap();
+        let a = app.run("shape.rectangle", json!({"x": 10, "y": 10, "width": 20, "height": 20})).unwrap()["id"].clone();
+        let b = app.run("shape.rectangle", json!({"x": 100, "y": 10, "width": 20, "height": 20})).unwrap()["id"].clone();
+        app.run("select.set", json!({"ids": [a, b]})).unwrap();
+        app.run("tool.select", json!({"tool": "selection"})).unwrap();
+        let ctx = egui::Context::default();
+        let click = |app: &mut VectorcraftApp| {
+            let events = json!([{"kind": "down", "x": 110, "y": 20}, {"kind": "up", "x": 110, "y": 20}]);
+            let (req, _) = ControlRequest::new("ui.pointer", json!({"events": events}));
+            let Outcome::Done(r) = handle(app, &ctx, &req) else { panic!("not done") };
+            assert_eq!(r["ok"], true, "{r}");
+            r["result"].get("key").cloned()
+        };
+        assert_eq!(click(&mut app), Some(b), "a click on a selected object makes it the key");
+        assert_eq!(click(&mut app), Some(Value::Null), "a click on the key again lets it go");
     }
 }

@@ -496,27 +496,39 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         (Some(c), _) => components(mode, &c),
         (None, _) => vec![0.0; mode.labels().len()],
     };
-    super::recent_colors_row(app, ui);
+    let recent = super::recent_colors_row(app, ui);
     widgets::divider(ui);
     // An edit of the active colour with its displayed components (`new`), or a colour clicked with
     // Alt held for the inactive proxy (`behind`).
     let mut new: Option<(Color, Live, Vec<f32>)> = None;
     let mut behind: Option<(Color, Live)> = None;
     let mut tinted: Option<(f32, Live)> = None;
-    let gamut = color.filter(|_| matches!(mode, Mode::Rgb | Mode::Hsb)).and_then(|c| gamut_fix(app, ui.ctx(), "color-gamut", &c));
+    // The warnings the mode shows: out of gamut in RGB and HSB, out of web colours but in Web Safe
+    // RGB and Grayscale.
+    let (shows_gamut, shows_web) = (matches!(mode, Mode::Rgb | Mode::Hsb), !matches!(mode, Mode::WebSafe | Mode::Grayscale));
+    let gamut = color.filter(|_| shows_gamut).and_then(|c| gamut_fix(app, ui.ctx(), "color-gamut", &c));
     ui.horizontal(|ui| {
         // Left column: proxy, out-of-gamut and out-of-web warnings.
         ui.vertical(|ui| {
             ui.set_width(44.0);
             super::proxy(app, ui, 40.0);
-            let web = color.filter(|c| !matches!(mode, Mode::WebSafe | Mode::Grayscale) && !is_web_safe(c)).map(|c| web_safe(&c));
-            for (warning, fix) in [(GAMUT_WARNING, gamut), (WEB_WARNING, web)] {
-                if let Some(fix) = fix {
-                    ui.add_space(6.0);
-                    if warning_chip(ui, warning, &fix) {
-                        new = Some((fix, Live::Released, components(mode, &fix)));
-                    }
+            let web = color.filter(|c| shows_web && !is_web_safe(c)).map(|c| web_safe(&c));
+            let warnings: Vec<_> = [(GAMUT_WARNING, gamut), (WEB_WARNING, web)].into_iter().filter_map(|(w, fix)| Some((w, fix?))).collect();
+            for (warning, fix) in &warnings {
+                ui.add_space(6.0);
+                if warning_chip(ui, *warning, fix) {
+                    new = Some((*fix, Live::Released, components(mode, fix)));
                 }
+            }
+            // Room for the mode's other warnings: the panel keeps its height as the colour changes,
+            // else the spectrum below moves under a dragging pointer and the colour flips every
+            // frame, e.g. between a pale colour out of gamut and white above the spectrum (#578).
+            for _ in warnings.len()..usize::from(shows_gamut) + usize::from(shows_web) {
+                ui.add_space(6.0);
+                ui.scope(|ui| {
+                    ui.set_invisible();
+                    warning_chip(ui, WEB_WARNING, &Color::WHITE)
+                });
             }
         });
         // Sliders (Shift-drag moves them in tandem).
@@ -573,6 +585,10 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             *new = Some((c, phase, components(mode, &c)));
         }
     };
+    // A recent colour, like the chips, recolours the selected gradient stop (or point).
+    if let Some(c) = recent {
+        pick(c, Live::Released, &mut new);
+    }
     // None / Black / White chips and the hex field.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -679,12 +695,23 @@ mod tests {
     /// Run the panel for one frame with `events` and `modifiers`; returns the spectrum's rect (when
     /// the options are shown) and the panel's height.
     fn frame(app: &mut VectorcraftApp, ctx: &egui::Context, events: Vec<egui::Event>, modifiers: egui::Modifiers) -> (Option<Rect>, f32) {
+        frame_with(app, ctx, events, modifiers, "color-spectrum")
+    }
+
+    /// [`frame`] returning the rect of the panel's widget `id` instead of the spectrum's.
+    fn frame_with(
+        app: &mut VectorcraftApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+        id: impl std::hash::Hash + std::fmt::Debug,
+    ) -> (Option<Rect>, f32) {
         let mut out = (None, 0.0);
         let events = std::iter::once(egui::Event::ModifiersChanged(modifiers)).chain(events).collect();
         let input = egui::RawInput { events, ..Default::default() };
         let mut full = ctx.run_ui(input, |ui| {
             show(app, ui);
-            out = (ctx.read_response(ui.id().with("color-spectrum")).map(|r| r.rect), ui.min_rect().height());
+            out = (ctx.read_response(ui.id().with(&id)).map(|r| r.rect), ui.min_rect().height());
         });
         full.textures_delta.clear();
         out
@@ -700,9 +727,64 @@ mod tests {
         frame(app, ctx, vec![], egui::Modifiers::NONE);
     }
 
+    #[test]
+    fn a_recent_colour_recolours_the_selected_gradient_stop() {
+        // #835: it replaced the whole gradient with the colour.
+        let mut app = app();
+        app.run("paint.setFill", json!({"color": "#ff0000"})).unwrap();
+        let stops = json!([{"offset": 0, "color": "#ffffff"}, {"offset": 1, "color": "#000000"}]);
+        app.run("paint.setFill", json!({"gradient": {"stops": stops, "start": [10, 35], "end": [60, 35]}})).unwrap();
+        app.select_tool("gradient");
+        app.run("gradient.selectStop", json!({"index": 1})).unwrap();
+        let red = app.session.recent_colors.iter().position(|c| c.to_hex() == "#ff0000").expect("red is a recent colour");
+        let ctx = egui::Context::default();
+        let none = egui::Modifiers::NONE;
+        let chip = frame_with(&mut app, &ctx, vec![], none, ("recent", red)).0.expect("the chip is drawn").center();
+        let button = |pressed| egui::Event::PointerButton { pos: chip, button: egui::PointerButton::Primary, pressed, modifiers: none };
+        frame(&mut app, &ctx, vec![egui::Event::PointerMoved(chip), button(true)], none);
+        frame(&mut app, &ctx, vec![button(false)], none);
+        let Paint::Gradient(g) = crate::panels::current_paints(&app).0 else { panic!("still a gradient") };
+        let hex: Vec<String> = g.gradient.stops.iter().map(|s| s.color.to_hex()).collect();
+        assert_eq!(hex, ["#ffffff", "#ff0000"]);
+    }
+
     fn paints_hex(app: &VectorcraftApp) -> (String, String) {
         let (f, s) = crate::panels::current_paints(app);
         (f.color().map(|c| c.to_hex()).unwrap_or_default(), s.color().map(|c| c.to_hex()).unwrap_or_default())
+    }
+
+    #[test]
+    fn a_drag_on_the_spectrum_holds_still_near_white() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let none = egui::Modifiers::NONE;
+        // White needs no warning, #fefefe the web one, a pale violet both: one panel height.
+        let heights: Vec<f32> = ["#ffffff", "#fefefe", "#ded3ff"]
+            .iter()
+            .map(|c| {
+                app.run("paint.setFill", json!({"color": c})).unwrap();
+                frame(&mut app, &ctx, vec![], none);
+                frame(&mut app, &ctx, vec![], none).1
+            })
+            .collect();
+        assert!(heights.windows(2).all(|w| w[0] == w[1]), "{heights:?}");
+        // Drag along the spectrum's top edge (pale colours, some out of gamut), stopping at each
+        // point: the colour holds while the pointer does.
+        let r = frame(&mut app, &ctx, vec![], none).0.expect("the spectrum is drawn");
+        let at = |x: f32| egui::pos2(r.left() + x * r.width(), r.top() + 2.0);
+        let button = |pressed| egui::Event::PointerButton { pos: at(0.02), button: egui::PointerButton::Primary, pressed, modifiers: none };
+        frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at(0.02)), button(true)], none);
+        for i in 1..20 {
+            frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at(i as f32 * 0.05))], none);
+            let fills: Vec<String> = (0..3)
+                .map(|_| {
+                    frame(&mut app, &ctx, vec![], none);
+                    paints_hex(&app).0
+                })
+                .collect();
+            assert!(fills.windows(2).all(|w| w[0] == w[1]), "at {}: {fills:?}", i as f32 * 0.05);
+        }
+        frame(&mut app, &ctx, vec![button(false)], none);
     }
 
     #[test]

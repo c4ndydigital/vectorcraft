@@ -18,10 +18,10 @@ use super::edit::selected_roots;
 use super::*;
 use crate::EngineError;
 
-const SIZES_KEY: &str = "symbolSizes";
+const SIZES_KEY: &str = vectorcraft_doc::SYMBOL_SIZES;
 const CURRENT_SYMBOL: &str = "currentSymbol";
 /// Half the instance box `Node::geometric_bounds` uses for symbol instances.
-const HALF: f64 = 10.0;
+const HALF: f64 = vectorcraft_doc::SYMBOL_HALF;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -63,7 +63,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Brush Options…",
             [],
             None,
-            "{name, params?: {…fields to change}, newName?} edit a brush definition (strokes using it update) → {name}",
+            "{name, params?: {…fields to change (brush.get shows them; values outside their ranges are clamped). calligraphic: angle −180..180°, roundness 0..100%, size 0..1296 pt, variation: [angle°, roundness%, size pt], modes: [fixed|random|pressure for angle, roundness, size] (pressure goes from value − variation at the lightest pen pressure to value + variation at the heaviest). scatter: size [a, b] 1..10000%, spacing [a, b] 1..10000%, scatter [a, b] −1000..1000%, rotation [a, b] −180..180°, modes: [fixed|random|pressure for size, spacing, scatter, rotation] (fixed: a; random: between a and b; pressure: a at the lightest pen pressure to b at the heaviest), rotation_relative_to_path. art: width 1..1000%, scale: {mode: proportional|stretch|betweenGuides, start, end: 0..1 of the art length}, direction: leftToRight|rightToLeft|topToBottom|bottomToTop, flip_along, flip_across. pattern: scale 1..10000%, spacing 0..10000%, fit: stretch|addSpace|approximate, flip_along, flip_across. scatter, art and pattern: colorization: {method: none|tints|tintsAndShades|hueShift, key: colour (hueShift: the art colour that becomes the stroke colour)}}, newName?} edit a brush definition (strokes using it update) → {name}",
             has_doc,
             brush_options
         ),
@@ -302,7 +302,7 @@ fn brush_set_current(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// The selection as one art node (a group for several objects), ids kept.
-fn selection_art(s: &Session, p: &Value) -> Result<Option<Node>> {
+pub(crate) fn selection_art(s: &Session, p: &Value) -> Result<Option<Node>> {
     let d = &s.doc()?.doc;
     let ids = roots(s, p)?;
     let nodes: Vec<Node> = ids.iter().filter_map(|id| d.node(*id).cloned()).collect();
@@ -383,10 +383,16 @@ fn brush_new(s: &mut Session, p: &Value) -> Result<Value> {
         }
         v[k] = serde_json::to_value(&art).unwrap_or_default();
     }
-    let b: Brush = serde_json::from_value(v).map_err(|e| bad(C, format!("invalid brush: {e}")))?;
-    lib.push(b);
+    lib.push(parse_brush(C, v)?);
     save_library(s, "New Brush", lib, None)?;
     Ok(json!({ "name": name }))
+}
+
+/// A brush definition from command params, its values kept within their ranges.
+fn parse_brush(cmd: &str, v: Value) -> Result<Brush> {
+    let mut b: Brush = serde_json::from_value(v).map_err(|e| bad(cmd, format!("invalid brush: {e}")))?;
+    b.sanitize();
+    Ok(b)
 }
 
 fn brush_delete(s: &mut Session, p: &Value) -> Result<Value> {
@@ -431,7 +437,7 @@ fn brush_options(s: &mut Session, p: &Value) -> Result<Value> {
         v["name"] = json!(name);
     }
     v["type"] = json!(lib[i].kind.type_id());
-    lib[i] = serde_json::from_value(v).map_err(|e| bad(C, format!("invalid brush: {e}")))?;
+    lib[i] = parse_brush(C, v)?;
     let out = lib[i].name.clone();
     let rename = new_name.map(|nn| (name, Some(nn)));
     save_library(s, "Brush Options", lib, rename)?;
@@ -597,7 +603,7 @@ fn symbol_place(s: &mut Session, p: &Value) -> Result<Value> {
     let centre = d.artboards.first().map(|a| a.rect.center()).unwrap_or(Point::ZERO);
     let c = Point::new(f64_or(p, "x", centre.x), f64_or(p, "y", centre.y));
     let size = natural_size(d, &name);
-    let parent = s.doc()?.insertion_parent();
+    let parent = s.doc()?.target_parent()?;
     let id = s.edit("Place Symbol Instance", |d, sel| {
         let id = d.alloc_id();
         d.insert(parent, usize::MAX, Node::new(id, NodeKind::SymbolInstance { symbol: name.clone(), xf: place_xf(c, size) }))?;
@@ -837,7 +843,8 @@ fn symbol_spray(s: &mut Session, p: &Value) -> Result<Value> {
     let alt = bool_or(p, "alt", false);
     let size = natural_size(&st.doc, &name);
     let set = st.selection.objects.first().copied().filter(|id| st.selection.len() == 1 && st.doc.node(*id).is_some_and(is_symbol_set));
-    let parent = st.insertion_parent();
+    // Only a new Symbol Set needs a layer that takes new art.
+    let parent = if alt || set.is_some() { st.insertion_parent() } else { st.target_parent()? };
     if alt {
         // Remove instances of this symbol under the brush (within the set, or anywhere).
         let d = &st.doc;

@@ -4,8 +4,11 @@
 //! and classic colour quantisation), not from any existing implementation:
 //!
 //! 1. **Quantise** the image into a small palette: a luminance threshold (Black and White), 1-D
-//!    k-means over the luminance histogram (Grayscale), or median cut followed by weighted
-//!    k-means over a 15-bit colour histogram (Color). Transparent pixels are left out.
+//!    k-means over the luminance histogram (Grayscale), or, in Color, over a 15-bit colour
+//!    histogram as the [`Palette`] asks: median cut to a colour count followed by weighted k-means
+//!    (Limited), median cut until every colour box is tight (Full Tone), one of those two by
+//!    whether the image is flat art (Automatic), or the most used colours of a swatch library
+//!    (Document Library). Transparent pixels are left out.
 //! 2. **Remove noise**: 4-connected same-colour components smaller than `noise` pixels are merged
 //!    into their most common neighbouring colour.
 //! 3. **Follow boundaries**: for each colour layer, the pixel-crack edges between inside and
@@ -18,12 +21,18 @@
 //! 5. **Curves**: the polygon is fitted with cubic Béziers (`vectorcraft_pathops::simplify_with`,
 //!    least squares with corner detection); optionally nearly-straight curves snap to lines.
 //!
+//! With **Create: Strokes**, the parts of a colour layer no wider than the stroke width are traced
+//! as stroked centre lines instead (see `centerline`); without Fills, wider parts become stroked
+//! outlines.
+//!
 //! Colour layers are traced either *abutting* (each colour's own area; shapes share edges) or
 //! *overlapping* (stacked: each layer also covers every layer above it, so no hairline gaps).
 #![forbid(unsafe_code)]
 
+mod centerline;
 mod contour;
 mod fit;
+mod logo;
 mod mosaic;
 mod quantize;
 
@@ -34,7 +43,7 @@ use vectorcraft_geom::PathData;
 
 pub use contour::{Component, Loop, trace_mask};
 pub use mosaic::mosaic;
-pub use quantize::{Quantized, TRANSPARENT, denoise, quantize};
+pub use quantize::{FULL_TONE_MAX, Quantized, TRANSPARENT, denoise, quantize};
 
 /// Errors decoding a raster.
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +54,10 @@ pub enum TraceError {
     Empty,
     #[error("the image is {width} × {height} pixels, more than Image Trace takes ({max} megapixels)")]
     TooLarge { width: u32, height: u32, max: u64 },
+    #[error("this isn't a flat-colour logo ({:.0}% of its solid areas match a few flat colours), so Flat Logo mode would turn its gradients into patches: use Color mode instead", (.fraction * 100.0).floor())]
+    NotFlat { fraction: f64 },
+    #[error("\"{0}\" is not a colour: write it as #rrggbb")]
+    BadPalette(String),
     #[error(
         "this trace would make more than {max} anchor points, more than the document can show smoothly: raise Noise, lower Paths or Colors, or pick a lower-fidelity preset"
     )]
@@ -54,6 +67,30 @@ pub enum TraceError {
 /// The most pixels an image to trace may have (64 megapixels: 256 MB decoded); larger images are
 /// refused instead of running out of memory.
 pub const MAX_PIXELS: u64 = 64 << 20;
+
+/// The most pixels an image may have for [`Raster::decode_to_fit`] to decode it and scale it down
+/// to [`MAX_PIXELS`] (192 megapixels: 768 MB decoded); larger images are refused.
+pub const MAX_SOURCE_PIXELS: u64 = 192 << 20;
+
+/// The largest size with `w : h`'s aspect of at most `max` pixels (each side at least 1).
+fn fit_size(w: u32, h: u32, max: u64) -> (u32, u32) {
+    let pixels = u64::from(w) * u64::from(h);
+    if pixels <= max || pixels == 0 {
+        return (w, h);
+    }
+    let k = (max as f64 / pixels as f64).sqrt();
+    let side = |v: u32| ((f64::from(v) * k).floor() as u32).clamp(1, v);
+    let (mut nw, mut nh) = (side(w), side(h));
+    // A side held at 1 pixel leaves the other too long: cut it to what fits.
+    if u64::from(nw) * u64::from(nh) > max {
+        if nw >= nh {
+            nw = u32::try_from(max / u64::from(nh)).unwrap_or(nw).clamp(1, nw);
+        } else {
+            nh = u32::try_from(max / u64::from(nw)).unwrap_or(nh).clamp(1, nh);
+        }
+    }
+    (nw, nh)
+}
 
 /// An RGBA8 raster (row-major, top row first).
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +131,37 @@ impl Raster {
         let (w, h) = img.dimensions();
         Ok(Self { width: w, height: h, rgba: img.into_raw() })
     }
+    /// Decode as [`Raster::decode`], but an image of more than [`MAX_PIXELS`] (up to
+    /// [`MAX_SOURCE_PIXELS`]) is scaled down, aspect kept, to the largest size within
+    /// [`MAX_PIXELS`] instead of being refused: a 300 ppi scan of a poster traces at slightly
+    /// less than its own resolution. The caller maps the result back with `width` / `height`.
+    pub fn decode_to_fit(bytes: &[u8]) -> Result<Self, TraceError> {
+        let decode_err = |e: image::ImageError| TraceError::Decode(e.to_string());
+        let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| TraceError::Decode(e.to_string()))?;
+        let (w, h) = reader.into_dimensions().map_err(decode_err)?;
+        if w == 0 || h == 0 {
+            return Err(TraceError::Empty);
+        }
+        let pixels = u64::from(w) * u64::from(h);
+        if pixels <= MAX_PIXELS {
+            return Self::decode(bytes);
+        }
+        if pixels > MAX_SOURCE_PIXELS {
+            return Err(TraceError::TooLarge { width: w, height: h, max: MAX_SOURCE_PIXELS >> 20 });
+        }
+        // Decoded within the allocation the source limit needs; the web keeps file import's 512 MB.
+        // A deeper image (16 bits a channel) that needs more fails with a decode error.
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| TraceError::Decode(e.to_string()))?;
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(if cfg!(target_arch = "wasm32") { 512 << 20 } else { MAX_SOURCE_PIXELS * 4 });
+        reader.limits(limits);
+        let img = reader.decode().map_err(decode_err)?.into_rgba8();
+        let (w, h) = img.dimensions();
+        let (nw, nh) = fit_size(w, h, MAX_PIXELS);
+        // Box-filtered: every source pixel counts, so thin lines and anti-aliased edges survive.
+        let small = image::imageops::thumbnail(&img, nw, nh);
+        Ok(Self { width: nw, height: nh, rgba: small.into_raw() })
+    }
     /// Encode as PNG.
     pub fn encode_png(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -119,6 +187,9 @@ pub enum Mode {
     Grayscale,
     #[serde(alias = "Color")]
     Color,
+    /// Flat-colour logos: sub-pixel edges, sharp corners restored, true lines and circles.
+    #[serde(alias = "Logo", alias = "flat", alias = "flatLogo")]
+    Logo,
 }
 
 /// How colour layers relate (Advanced → Method).
@@ -132,6 +203,28 @@ pub enum Method {
     Overlapping,
 }
 
+/// Where Color mode's colours come from (the Palette popup).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Palette {
+    /// The `colors` colours that best represent the image.
+    #[default]
+    #[serde(alias = "Limited")]
+    Limited,
+    /// As many colours as the image's tones need, up to [`FULL_TONE_MAX`] (photos, gradients):
+    /// `color_detail` sets how close two colours may be and stay apart.
+    #[serde(alias = "Full Tone")]
+    FullTone,
+    /// Flat art (a few colours cover nearly all of it) traces with exactly those colours, anything
+    /// else as Full Tone.
+    #[serde(alias = "Automatic")]
+    Automatic,
+    /// The most used colours of a swatch library ([`TraceParams::swatches`]), at most `colors` of
+    /// them, exactly as they are.
+    #[serde(alias = "library", alias = "Document Library")]
+    DocumentLibrary,
+}
+
 /// Image Trace parameters (the Image Trace panel).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -139,19 +232,43 @@ pub struct TraceParams {
     pub mode: Mode,
     /// Black and White: pixels darker than this (luminance 0–255) are black.
     pub threshold: u8,
-    /// Palette size for Color, number of grays for Grayscale (2–256).
+    /// Color: where the colours come from.
+    pub palette: Palette,
+    /// Palette size for Color (Limited; at most this many for Document Library), number of grays
+    /// for Grayscale (2–256).
     pub colors: u32,
+    /// Full Tone and Automatic: how many colours, 0 (few) – 100 (many).
+    pub color_detail: f64,
+    /// Document Library: the swatch library, `"document"` (the document's swatches) or a library id
+    /// or name. The caller looks its colours up into `swatches`.
+    pub library: String,
+    /// Document Library: the library's colours (sRGB). Not saved: they are looked up from
+    /// `library` at every trace.
+    #[serde(skip)]
+    pub swatches: Vec<[u8; 3]>,
     /// Paths (fidelity) 0–100: higher follows the pixels more tightly.
     pub paths: f64,
     /// Corners 0–100: higher keeps more corners.
     pub corners: f64,
-    /// Noise: areas smaller than this many pixels are ignored.
+    /// Noise: areas smaller than this many pixels are ignored. (Flat Logo mode: areas smaller than
+    /// `noise / 10` pixels of the source image.)
     pub noise: u32,
     pub method: Method,
     /// Drop white areas (no white background shape).
     pub ignore_white: bool,
-    /// Replace nearly-straight curves with straight lines.
+    /// Replace nearly-straight curves with straight lines. In Logo mode this also snaps tight arcs
+    /// to true circles.
     pub snap_curves_to_lines: bool,
+    /// Create: trace areas as filled shapes.
+    pub fills: bool,
+    /// Create: trace lines no wider than `stroke_width` as stroked centre lines.
+    pub strokes: bool,
+    /// Stroke: the widest feature (px) traced as a stroke.
+    pub stroke_width: f64,
+    /// Flat Logo mode: the flat colours (`#rrggbb`) to use; empty finds them automatically. White is
+    /// always traced on its own and cannot be named, colours closer than about 12 (RGB distance)
+    /// count as one, and at most ten are used. (Not `palette`: that is Color mode's colour source.)
+    pub logo_colors: Vec<String>,
 }
 
 impl Default for TraceParams {
@@ -160,13 +277,21 @@ impl Default for TraceParams {
         Self {
             mode: Mode::BlackAndWhite,
             threshold: 128,
+            palette: Palette::Limited,
             colors: 6,
+            color_detail: 50.0,
+            library: "document".into(),
+            swatches: vec![],
             paths: 50.0,
             corners: 75.0,
             noise: 25,
             method: Method::Abutting,
             ignore_white: false,
             snap_curves_to_lines: false,
+            fills: true,
+            strokes: false,
+            stroke_width: 10.0,
+            logo_colors: Vec::new(),
         }
     }
 }
@@ -203,6 +328,7 @@ pub const PRESET_NAMES: &[&str] = &[
     "Silhouettes",
     "Line Art",
     "Technical Drawing",
+    "Flat Logo",
 ];
 
 /// A built-in preset by name (case-insensitive; `[Default]` is accepted).
@@ -241,6 +367,8 @@ pub fn preset(name: &str) -> Option<TraceParams> {
         "silhouettes" => bw(200, 40.0, 60.0, 30, false),
         "line art" => bw(128, 80.0, 70.0, 10, false),
         "technical drawing" => bw(128, 95.0, 90.0, 4, true),
+        // Flat-colour logos: colours found automatically, edges placed to a fraction of a pixel.
+        "flat logo" => TraceParams { mode: Mode::Logo, colors: 8, paths: 60.0, corners: 50.0, noise: 6, snap_curves_to_lines: true, ..d },
         _ => return None,
     })
 }
@@ -250,7 +378,8 @@ pub fn presets() -> Vec<(&'static str, TraceParams)> {
     PRESET_NAMES.iter().filter_map(|n| Some((*n, preset(n)?))).collect()
 }
 
-/// One traced shape: an outer contour plus its holes, filled with `color`.
+/// One traced shape: an outer contour plus its holes, filled with `color`, or (with `stroke`)
+/// lines stroked with it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TracedPath {
     /// In pixel coordinates (x right, y down; the image spans `0..width × 0..height`).
@@ -258,6 +387,9 @@ pub struct TracedPath {
     pub color: [u8; 3],
     /// Filled pixel count of the component the path came from.
     pub pixels: usize,
+    /// Create Strokes: the path is stroked this wide (px), not filled (centre lines, or the
+    /// outlines of wider areas without Fills).
+    pub stroke: Option<f64>,
 }
 
 /// The traced result, bottom-most path first.
@@ -278,7 +410,8 @@ fn is_white(c: [u8; 3]) -> bool {
     c.iter().all(|&v| v >= 245)
 }
 
-/// Trace `img` with `params`.
+/// Trace `img` with `params`. Failures (an image Logo mode refuses, say) give an empty result: use
+/// [`trace_within`] to see why.
 pub fn trace(img: &Raster, params: &TraceParams) -> TraceResult {
     // No trace has more than `usize::MAX` anchors.
     trace_within(img, params, usize::MAX).unwrap_or_default()
@@ -291,6 +424,9 @@ pub fn trace_within(img: &Raster, params: &TraceParams, max_anchors: usize) -> R
     let (w, h) = (img.width as usize, img.height as usize);
     if w == 0 || h == 0 || img.rgba.len() != w * h * 4 {
         return Ok(TraceResult::default());
+    }
+    if params.mode == Mode::Logo {
+        return logo::trace_logo(img, params, max_anchors);
     }
     let mut q = quantize(img, params);
     denoise(&mut q.labels, w, h, params.noise as usize);
@@ -357,15 +493,37 @@ impl Layers<'_> {
         let (params, opts) = (self.params, &self.opts);
         let color = *self.q.palette.get(ci)?;
         let overlapping = params.method == Method::Overlapping;
+        let (w, h) = (self.w, self.h);
+        // Create Strokes: this colour's lines, left out of its areas.
+        let (thin, lines) = if params.strokes {
+            centerline::lines(&self.q.labels, u16::try_from(ci).unwrap_or(TRANSPARENT), w, h, params.stroke_width, opts)
+        } else {
+            (vec![], vec![])
+        };
         let mask: Vec<bool> = self
             .q
             .labels
             .iter()
-            .map(|&l| l != TRANSPARENT && if overlapping { self.rank.get(l as usize).is_some_and(|&lr| lr >= r) } else { l as usize == ci })
+            .enumerate()
+            .map(|(i, &l)| {
+                l != TRANSPARENT
+                    && !thin.get(i).copied().unwrap_or(false)
+                    && if overlapping { self.rank.get(l as usize).is_some_and(|&lr| lr >= r) } else { l as usize == ci }
+            })
             .collect();
+        // Without Fills, areas are outlined with a 1 px stroke.
+        let area_stroke = (params.strokes && !params.fills).then_some(1.0);
         let min_hole = params.noise.max(1) as i64;
         let mut paths = vec![];
-        for comp in trace_mask(&mask, self.w, self.h) {
+        let mut add = |path: PathData, pixels: usize, stroke: Option<f64>| {
+            let n = path.anchor_count();
+            if self.anchors.fetch_add(n, Ordering::Relaxed).saturating_add(n) > self.max_anchors {
+                return false;
+            }
+            paths.push(TracedPath { path, color, pixels, stroke });
+            true
+        };
+        for comp in trace_mask(&mask, w, h) {
             let Some(outer) = fit::fit_loop(&comp.outer, opts) else { continue };
             let mut subs = vec![outer];
             for hole in &comp.holes {
@@ -374,12 +532,14 @@ impl Layers<'_> {
                 }
                 subs.extend(fit::fit_loop(hole, opts));
             }
-            let path = PathData::new(subs);
-            let n = path.anchor_count();
-            if self.anchors.fetch_add(n, Ordering::Relaxed).saturating_add(n) > self.max_anchors {
+            if !add(PathData::new(subs), comp.pixels, area_stroke) {
                 return None;
             }
-            paths.push(TracedPath { path, color, pixels: comp.pixels });
+        }
+        for line in lines {
+            if !add(line.path, line.pixels, Some(line.width)) {
+                return None;
+            }
         }
         Some(paths)
     }

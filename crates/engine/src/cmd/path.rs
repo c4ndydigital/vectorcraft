@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
-use vectorcraft_doc::{NodeId, NodeKind};
+use vectorcraft_doc::{NodeId, NodeKind, Scaling};
 use vectorcraft_geom::{AnchorKind, PathData, Point, SubPath, Vec2};
 
 use super::create::anchor_from_json;
@@ -27,7 +27,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Move Anchors",
             [],
             None,
-            "{dx, dy} move direct-selected anchors (whole paths if fully selected)",
+            "{dx, dy, patterns?: bool (Transform Patterns: pattern fills and strokes transform with the objects that move whole; default: prefs transformPatternTiles)} move direct-selected anchors (whole paths if fully selected)",
             has_selection,
             move_anchors
         ),
@@ -63,7 +63,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Join",
             ["Object", "Path"],
             Some("Cmd+J"),
-            "{} join two open paths' nearest endpoints, or close a single open path",
+            "{ids?: [path, path] (default: the selected paths), ends?: [\"first\"|\"last\", \"first\"|\"last\"] (which end of each path to join, as the Pen joins them; default: the nearest pair)} join two open paths into one (the first keeps its id, selected), or close a single open path",
             has_selection,
             join
         ),
@@ -116,7 +116,7 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-fn path_mut(d: &mut vectorcraft_doc::Document, id: NodeId) -> Result<&mut PathData> {
+pub(super) fn path_mut(d: &mut vectorcraft_doc::Document, id: NodeId) -> Result<&mut PathData> {
     let n = d.node_mut(id).ok_or(EngineError::NoNode(id))?;
     match &mut n.kind {
         NodeKind::Path { path, live, .. } => {
@@ -129,7 +129,7 @@ fn path_mut(d: &mut vectorcraft_doc::Document, id: NodeId) -> Result<&mut PathDa
 
 fn append_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let id = id_param(p, "id").ok_or_else(|| bad("path.appendAnchor", "missing id"))?;
-    let a = anchor_from_json(p).ok_or_else(|| bad("path.appendAnchor", "missing x/y"))?;
+    let a = anchor_from_json(p, "path.appendAnchor")?;
     s.edit("Pen", |d, sel| {
         let path = path_mut(d, id)?;
         match path.subpaths.last_mut() {
@@ -172,6 +172,10 @@ pub(crate) fn move_anchors(s: &mut Session, p: &Value) -> Result<Value> {
     let sel = st.selection.clone();
     let scale_strokes = s.prefs.scale_strokes;
     let _ = scale_strokes;
+    // Objects selected whole (with no entry in `sel.anchors`) move as objects, and their pattern
+    // tiles move with them when `patterns` (default: General › Transform Pattern Tiles) is on.
+    let whole: Vec<NodeId> = sel.objects.iter().copied().filter(|id| !sel.anchors.contains_key(id)).collect();
+    let sc = Scaling { patterns: super::object::transform_patterns(s, p, &whole)?, ..Scaling::default() };
     s.edit("Move", |doc, _| {
         for id in &sel.objects {
             match sel.anchors.get(id) {
@@ -185,7 +189,7 @@ pub(crate) fn move_anchors(s: &mut Session, p: &Value) -> Result<Value> {
                 }
                 None => {
                     if let Some(n) = doc.node_mut(*id) {
-                        n.transform(vectorcraft_geom::Affine::translate(d), false);
+                        n.transform(vectorcraft_geom::Affine::translate(d), sc);
                     }
                 }
             }
@@ -217,12 +221,21 @@ fn set_anchors(s: &mut Session, p: &Value) -> Result<Value> {
     let data = PathData::new(
         subs.iter()
             .map(|sp| {
-                SubPath::new(
-                    sp.get("anchors").and_then(Value::as_array).map(|a| a.iter().filter_map(anchor_from_json).collect()).unwrap_or_default(),
-                    bool_or(sp, "closed", false),
-                )
+                let anchors = sp
+                    .get("anchors")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| bad("path.setAnchors", "each subpath needs an anchors array"))?
+                    .iter()
+                    .map(|a| anchor_from_json(a, "path.setAnchors"))
+                    .collect::<Result<Vec<_>>>()?;
+                let closed = match sp.get("closed") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(v)) => *v,
+                    Some(_) => return Err(bad("path.setAnchors", "closed must be a boolean")),
+                };
+                Ok(SubPath::new(anchors, closed))
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
     );
     s.edit("Reshape", |d, _| {
         *path_mut(d, id)? = data;
@@ -283,8 +296,27 @@ fn end_points(sp: &SubPath) -> Option<(Point, Point)> {
     Some((sp.anchors.first()?.p, sp.anchors.last()?.p))
 }
 
-fn join(s: &mut Session, _: &Value) -> Result<Value> {
-    let ids = selected_paths(s)?;
+fn join(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "path.join";
+    let ids = match ids_param(p, "ids") {
+        Some(ids) => {
+            let st = s.doc()?;
+            if let Some(id) = ids.iter().find(|id| !matches!(st.doc.node(**id).map(|n| &n.kind), Some(NodeKind::Path { .. }))) {
+                return Err(bad(C, format!("{} isn't a path", id.0)));
+            }
+            ids
+        }
+        None => selected_paths(s)?,
+    };
+    // The ends to join, as (reverse the first path, reverse the second): the first path's end
+    // must come last, the second's first.
+    let ends = match p.get("ends") {
+        None => None,
+        Some(e) => match e.as_array().map(|a| a.iter().map(Value::as_str).collect::<Vec<_>>()).as_deref() {
+            Some([Some(a @ ("first" | "last")), Some(b @ ("first" | "last"))]) => Some((*a == "first", *b == "last")),
+            _ => return Err(bad(C, "ends must be two of \"first\" and \"last\"")),
+        },
+    };
     match ids.as_slice() {
         [one] => {
             let id = *one;
@@ -305,6 +337,9 @@ fn join(s: &mut Session, _: &Value) -> Result<Value> {
         }
         [a, b, ..] => {
             let (a, b) = (*a, *b);
+            if a == b {
+                return Err(bad(C, "join two different paths"));
+            }
             s.edit("Join", |d, sel| {
                 let pb = d.node(b).and_then(|n| n.path_data()).cloned().ok_or(EngineError::NoNode(b))?;
                 let pa = path_mut(d, a)?;
@@ -316,10 +351,11 @@ fn join(s: &mut Session, _: &Value) -> Result<Value> {
                 let (Some((xf, xl)), Some((yf, yl))) = (end_points(&x), end_points(&y)) else {
                     return Err(EngineError::Other("join needs open paths".into()));
                 };
-                // Pick the closest pair of ends.
+                // The ends asked for, else the closest pair.
                 let cands =
                     [(xl.distance(yf), false, false), (xl.distance(yl), false, true), (xf.distance(yf), true, false), (xf.distance(yl), true, true)];
-                let (_, rx, ry) = cands.into_iter().min_by(|p, q| p.0.total_cmp(&q.0)).unwrap_or((0.0, false, false));
+                let (rx, ry) =
+                    ends.unwrap_or_else(|| cands.into_iter().min_by(|p, q| p.0.total_cmp(&q.0)).map_or((false, false), |(_, rx, ry)| (rx, ry)));
                 if rx {
                     x.reverse();
                 }
@@ -346,9 +382,9 @@ fn join(s: &mut Session, _: &Value) -> Result<Value> {
     ok()
 }
 
-type AnchorTargets = Vec<(NodeId, Vec<(usize, usize)>)>;
+pub(super) type AnchorTargets = Vec<(NodeId, Vec<(usize, usize)>)>;
 
-fn anchor_targets(s: &Session) -> Result<AnchorTargets> {
+pub(super) fn anchor_targets(s: &Session) -> Result<AnchorTargets> {
     let st = s.doc()?;
     let mut out = vec![];
     for id in &st.selection.objects {
@@ -424,21 +460,35 @@ fn convert_anchors(s: &mut Session, p: &Value) -> Result<Value> {
 pub(crate) fn delete_anchors(s: &mut Session, _: &Value) -> Result<Value> {
     let st = s.doc()?;
     let sel = st.selection.anchors.clone();
+    let segments = st.selection.segments.clone();
     s.edit("Clear", |d, selection| {
+        let mut survivors = vec![];
         for (id, set) in &sel {
             let remove_node = {
                 let path = path_mut(d, *id)?;
-                // Deleting an anchor from a closed path opens it there (Illustrator behaviour on Delete).
-                for &(si, ai) in set.iter().rev() {
-                    if let Some(sp) = path.subpaths.get_mut(si)
-                        && ai < sp.anchors.len()
-                    {
-                        if sp.closed {
-                            sp.anchors.rotate_left(ai + 1);
-                            sp.anchors.pop();
-                            sp.closed = false;
-                        } else {
-                            sp.anchors.remove(ai);
+                if let Some(refs) = segments.get(id) {
+                    // A segment pick cuts its connection, keeping every neighboring cubic.
+                    path.subpaths = std::mem::take(&mut path.subpaths)
+                        .into_iter()
+                        .enumerate()
+                        .flat_map(|(si, sp)| {
+                            let cuts = refs.iter().filter_map(|&(s, seg)| (s == si).then_some(seg)).collect();
+                            without_segments(sp, &cuts)
+                        })
+                        .collect();
+                } else {
+                    // Deleting an anchor from a closed path opens it there (Illustrator behaviour on Delete).
+                    for &(si, ai) in set.iter().rev() {
+                        if let Some(sp) = path.subpaths.get_mut(si)
+                            && ai < sp.anchors.len()
+                        {
+                            if sp.closed {
+                                sp.anchors.rotate_left(ai + 1);
+                                sp.anchors.pop();
+                                sp.closed = false;
+                            } else {
+                                sp.anchors.remove(ai);
+                            }
                         }
                     }
                 }
@@ -447,12 +497,50 @@ pub(crate) fn delete_anchors(s: &mut Session, _: &Value) -> Result<Value> {
             };
             if remove_node {
                 d.remove(*id)?;
+            } else if segments.contains_key(id) {
+                survivors.push(*id);
             }
         }
-        selection.clear();
+        // Another Delete removes the remaining path after a segment cut. Anchor Delete keeps
+        // its existing deselection behavior.
+        selection.set(survivors);
         Ok(())
     })?;
     ok()
+}
+
+/// Remove connections, splitting open/closed contours into their surviving open runs.
+fn without_segments(sp: SubPath, removed: &BTreeSet<usize>) -> Vec<SubPath> {
+    let cuts: BTreeSet<usize> = removed.iter().copied().filter(|&i| i < sp.segment_count()).collect();
+    let Some(&first) = cuts.first() else { return vec![sp] };
+    let n = sp.anchors.len();
+    let start = if sp.closed { (first + 1) % n } else { 0 };
+    let mut result = vec![];
+    let mut run = vec![];
+    let mut previous = None;
+    for (index, anchor) in sp.anchors.iter().enumerate().cycle().skip(start).take(n) {
+        if previous.is_some_and(|i| cuts.contains(&i)) {
+            result.extend(open_run(std::mem::take(&mut run)));
+        }
+        run.push(*anchor);
+        previous = Some(index);
+    }
+    result.extend(open_run(run));
+    result
+}
+
+fn open_run(mut anchors: Vec<vectorcraft_geom::Anchor>) -> Option<SubPath> {
+    if anchors.len() < 2 {
+        return None;
+    }
+    // The cut edge's incoming/outgoing controls are no longer part of an open endpoint.
+    if let Some(first) = anchors.first_mut() {
+        first.h_in = first.p;
+    }
+    if let Some(last) = anchors.last_mut() {
+        last.h_out = last.p;
+    }
+    Some(SubPath::new(anchors, false))
 }
 
 fn reshape(s: &mut Session, p: &Value) -> Result<Value> {

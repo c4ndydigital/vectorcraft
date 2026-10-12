@@ -108,6 +108,24 @@ fn a_handle_drag_resizes_the_type_area_and_the_text_reflows() {
     assert!(layout(&s, id).overflow);
 }
 
+/// Transform Again after a handle drag on area type repeats the drag: it resizes the type area
+/// again, and the type keeps its size.
+#[test]
+fn transform_again_after_a_handle_drag_resizes_the_type_area_again() {
+    let mut s = session();
+    let id = area(&mut s, 40.0, 40.0, 120.0, 40.0, STORY);
+    sel(&mut s, &[id]);
+    // The bottom-right handle, from (160, 80) to (200, 140): 4/3 as wide and 2.5 times as tall.
+    drag(&mut s, "selection", Point::new(160.0, 80.0), Point::new(200.0, 140.0));
+    s.execute("object.transformAgain", &json!({})).unwrap();
+    assert_eq!(last_step(&s), "Transform Again");
+    let r = frame(&s, id);
+    assert!(near(r.origin(), Point::ZERO) && (r.width() - 640.0 / 3.0).abs() < 1e-6 && (r.height() - 250.0).abs() < 1e-6, "{r:?}");
+    let t = text(&s, id);
+    assert_eq!(t.xf, Affine::translate((40.0, 40.0)), "the type isn't scaled");
+    assert!(t.runs.iter().all(|r| r.style.size == 12.0));
+}
+
 #[test]
 fn point_type_still_scales_with_its_handles() {
     let mut s = session();
@@ -236,6 +254,9 @@ fn reshape_area_takes_untrusted_params() {
         json!({"id": id.0, "dx": 1, "dy": 1}),
         json!({"id": id.0, "anchors": [], "dx": 1, "dy": 1}),
         json!({"id": id.0, "anchors": [["a", 1], [0], "x"], "dx": 1, "dy": 1}),
+        // A malformed reference among good ones fails rather than moving only the good ones.
+        json!({"id": id.0, "anchors": [[0, 2], [0, "3"]], "dx": 1, "dy": 1}),
+        json!({"id": id.0, "anchors": [[0, 2], [0, 3, 1]], "dx": 1, "dy": 1}),
         json!({"id": id.0, "anchors": [[0, 9]], "dx": 1, "dy": 1}),
         json!({"id": id.0, "anchors": [[0, 1], [7, 0]], "dx": 1, "dy": 1}),
         json!({"id": id.0, "anchors": [[0, 2]], "dy": 1}),
@@ -338,4 +359,39 @@ fn the_type_widget_converts_point_and_area_type() {
     s.execute("edit.undo", &json!({})).unwrap();
     s.execute("edit.undo", &json!({})).unwrap();
     assert_eq!(text(&s, id), before);
+}
+
+#[test]
+fn area_type_options_align_the_lines_vertically() {
+    use vectorcraft_doc::VerticalAlign;
+    let mut s = session();
+    let id = area(&mut s, 40.0, 40.0, 200.0, 300.0, "Short story");
+    sel(&mut s, &[id]);
+    assert_eq!(s.execute("text.areaOptions", &json!({})).unwrap()["verticalAlign"], "top");
+    let top = layout(&s, id).lines[0].baseline;
+    let before = text(&s, id).cached_bounds;
+    let n = undo_len(&s);
+    let r = s.execute("text.areaOptions", &json!({"verticalAlign": "bottom"})).unwrap();
+    assert_eq!(r["verticalAlign"], "bottom");
+    assert_eq!(text(&s, id).area.vertical_align, VerticalAlign::Bottom);
+    let l = layout(&s, id);
+    let last = l.lines.last().unwrap();
+    assert!((last.baseline + last.descent - 300.0).abs() < 1e-6);
+    assert!(l.lines[0].baseline > top + 200.0);
+    assert_ne!(text(&s, id).cached_bounds, before, "the cached bounds follow the text");
+    assert_eq!((undo_len(&s), last_step(&s).as_str()), (n + 1, "Area Type Options"));
+    s.execute("text.areaOptions", &json!({"verticalAlign": "center"})).unwrap();
+    assert_eq!(text(&s, id).area.vertical_align, VerticalAlign::Center);
+    // Unknown values are refused and change nothing.
+    for bad in [json!({"verticalAlign": "middle"}), json!({"verticalAlign": 3}), json!({"verticalAlign": null})] {
+        assert!(s.execute("text.areaOptions", &bad).is_err(), "{bad}");
+    }
+    assert_eq!(undo_len(&s), n + 2);
+    assert_eq!(text(&s, id).area.vertical_align, VerticalAlign::Center);
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(text(&s, id).area.vertical_align, VerticalAlign::Top);
+    assert_eq!(layout(&s, id).lines[0].baseline, top);
+    assert_eq!(text(&s, id).cached_bounds, before);
+    assert!(cmd::find_command("text.areaOptions").unwrap().params.contains("verticalAlign?: top|center|bottom|justify"));
 }

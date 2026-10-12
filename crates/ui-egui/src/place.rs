@@ -42,8 +42,9 @@ pub struct DropAt {
 pub enum DropTarget {
     /// The canvas of the document it was dropped on.
     Place(DropAt),
-    /// Opened as a document: no document is open, the drop missed the canvas (the tab bar), or it
-    /// is a document dropped where the platform doesn't say.
+    /// Opened as File → Open opens it: no document is open, the drop missed the canvas (the tab
+    /// bar), it is a document dropped where the platform doesn't say, or it is a library, a presets
+    /// file or a plug-in.
     Open,
 }
 
@@ -135,10 +136,10 @@ fn pick(app: &mut VectorcraftApp) -> Result<(), String> {
         f();
         return Ok(());
     }
-    let paths = match (app.services.pick_open_multi.as_mut(), app.services.pick_open.as_mut()) {
-        (Some(f), _) => f(),
-        (None, Some(f)) => f(&crate::FilePick { filters: fileio::place_filters().collect(), ..Default::default() }).into_iter().collect(),
-        (None, None) => vec![],
+    let paths = if app.services.pick_open_multi.is_some() {
+        crate::picks::open_many(app)
+    } else {
+        crate::picks::open(app, &crate::FilePick { filters: fileio::place_filters().collect(), ..Default::default() }).into_iter().collect()
     };
     if paths.is_empty() {
         return Err("cancelled".into());
@@ -160,9 +161,18 @@ fn open_dialog(app: &mut VectorcraftApp, files: Vec<Value>) {
             "template": false,
             "replace": false,
             "__replace": files.len() == 1 && one_object,
+            "__documents": files.iter().any(is_vectorcraft_file),
+            "__others": !files.iter().all(is_vectorcraft_file),
             "__info": info,
         }),
     ));
+}
+
+/// Is dialog file entry `file` a VectorCraft document on disk (what Link places as one locked
+/// object)?
+fn is_vectorcraft_file(file: &Value) -> bool {
+    let native = ["vectorcraft", vectorcraft_format::LEGACY_EXTENSION, "vctemplate"];
+    file.get("path").and_then(Value::as_str).is_some_and(|p| native.contains(&fileio::extension(p).as_str()))
 }
 
 /// The engine params naming `file` (a dialog file entry).
@@ -291,10 +301,12 @@ impl VectorcraftApp {
     /// Where file `name` dropped with the pointer at `pos` (screen points) goes: as in Illustrator,
     /// onto the canvas of the open document (Shift embeds it), else opened. Where the platform
     /// doesn't say (`None`: desktop drags carry no position), a document opens as a tab of its
-    /// own and a picture or text is placed in the middle of the view.
+    /// own and a picture or text is placed in the middle of the view. A library, a presets file or
+    /// a plug-in opens wherever it is dropped, as File → Open opens it ([`io::opens_as`]).
     pub fn drop_target(&self, name: &str, pos: Option<egui::Pos2>, shift: bool) -> DropTarget {
         let (Some(rect), Some(st), Some(v)) = (self.canvas_rect, self.session.active(), self.view()) else { return DropTarget::Open };
         let at = match pos {
+            _ if io::opens_as(name).is_some() => return DropTarget::Open,
             Some(p) if !rect.contains(p) => return DropTarget::Open,
             Some(p) => crate::canvas::Xf::new(rect, v).to_doc(p),
             None if is_document(name) => return DropTarget::Open,
@@ -339,14 +351,19 @@ pub fn drop_files(app: &mut VectorcraftApp, mut files: Vec<(DropTarget, DropFile
                 p["link"] = json!(!embed);
                 run(app, &p).map(|_| ())
             }
-            DropTarget::Open => io::open_bytes(app, &name, &bytes, path.clone()).map(|_| {
-                if let Some(path) = &path {
-                    io::note_recent(app, path);
-                }
-            }),
+            DropTarget::Open => match path.as_deref() {
+                Some(path) if app.services.read.is_some() => io::open_path(app, path).map(|_| ()),
+                _ => io::open_bytes(app, &name, &bytes, path.clone()).map(|_| {
+                    if let Some(path) = &path {
+                        io::note_recent(app, path);
+                    }
+                }),
+            },
         };
-        if let Err(e) = r {
-            app.status(if target == DropTarget::Open { format!("Couldn't open {name}: {e}") } else { format!("Couldn't place {name}: {e}") });
+        match r {
+            Err(e) if target == DropTarget::Open => io::report_open_error(app, &name, &e),
+            Err(e) => app.status(format!("Couldn't place {name}: {e}")),
+            Ok(()) => {}
         }
     }
 }
@@ -372,7 +389,9 @@ pub fn drain(app: &mut VectorcraftApp) {
     }
 }
 
-/// Files dragged over the window: the canvas is outlined where they would be placed.
+/// Files dragged over the window: the canvas is outlined where they would be placed. On the web
+/// the browser gives a dragged file's type but not its name, so the canvas is outlined for any
+/// file dragged over it, including libraries, presets and plug-ins, which open when dropped.
 pub fn paint_drop_highlight(app: &VectorcraftApp, ctx: &egui::Context, painter: &egui::Painter, rect: egui::Rect) {
     let pos = drag_pos(ctx);
     let placed = ctx.input(|i| {
@@ -427,7 +446,7 @@ pub fn control_bar_details(app: &mut VectorcraftApp, ui: &mut egui::Ui) -> bool 
     ui.separator();
     link_buttons(app, ui, id, linked, &name, None);
     crate::panels::image_trace::trace_button(app, ui, crate::panels::image_trace::TRACE_BUTTON_W);
-    for (label, cmd, w) in [(tl!("Mask"), "object.maskImage", 52.0), (tl!("Crop Image"), "object.cropImage", 84.0)] {
+    for (label, cmd, w) in [(tl!("Mask"), "object.maskImage", 52.0), (tl!("Crop Image"), "ui.cropImage", 84.0)] {
         if widgets::flat_button(ui, label, w).clicked() {
             crate::menus::invoke(app, cmd, json!({}));
         }

@@ -309,3 +309,47 @@ fn test_crdt_multi_tab_creation_and_shape_isolation() {
     );
 }
 
+#[test]
+fn test_crdt_room_red_square_injector() {
+    let snapshot_path = std::path::Path::new("/tmp/room_snapshot.bin");
+    let mut session = vectorcraft_engine::Session::new();
+    let mut bridge = CollabBridge::with_client_id(777_777);
+
+    let has_snapshot = snapshot_path.exists()
+        && std::fs::metadata(snapshot_path).map(|m| m.len() > 2).unwrap_or(false);
+
+    if has_snapshot {
+        let snapshot_bytes = std::fs::read(snapshot_path).unwrap();
+        let _ = bridge.apply_remote_update(&mut session, &snapshot_bytes);
+        println!("Loaded snapshot ({} bytes), active docs: {}", snapshot_bytes.len(), session.documents().len());
+    }
+
+    if session.documents().is_empty() {
+        let _ = session.execute("file.new", &json!({"width": 800.0, "height": 600.0}));
+        let _ = bridge.sync_from_session(&session);
+    }
+
+    let rect_val = session
+        .execute(
+            "shape.rectangle",
+            &json!({
+                "x": 200.0,
+                "y": 150.0,
+                "width": 250.0,
+                "height": 250.0,
+            }),
+        )
+        .expect("create rectangle");
+
+    let rect_id = NodeId(rect_val["id"].as_u64().expect("valid rect id"));
+    vectorcraft_testkit::fixtures::select(&mut session, &[rect_id]);
+    let _ = session.execute("paint.setFill", &json!({ "color": "#ff0000" }));
+
+    let update = bridge.sync_from_session(&session).expect("sync from session");
+    let full_state = bridge.export_update();
+
+    std::fs::write("/tmp/red_square_diff.bin", &update).unwrap();
+    std::fs::write("/tmp/red_square_full.bin", &full_state).unwrap();
+    println!("Exported diff update: {} bytes, full state: {} bytes", update.len(), full_state.len());
+}
+

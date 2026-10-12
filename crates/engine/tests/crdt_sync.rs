@@ -185,3 +185,65 @@ fn test_crdt_z_order_synchronization() {
     assert_eq!(pos1_b, pos1_after);
     assert!(pos2_b < pos1_b, "r2 must be behind r1 in session_b as well");
 }
+
+#[test]
+fn test_crdt_group_hierarchy_and_name_sync() {
+    let mut session_a = session_with(800.0, 600.0);
+    let mut session_b = session_with(800.0, 600.0);
+
+    let mut bridge_a = CollabBridge::with_client_id(501);
+    let mut bridge_b = CollabBridge::with_client_id(502);
+
+    // Create 2 shapes in session_a
+    let r1 = session_a.execute("shape.rectangle", &json!({ "x": 10.0, "y": 10.0, "width": 50.0, "height": 50.0 })).unwrap();
+    let r2 = session_a.execute("shape.rectangle", &json!({ "x": 70.0, "y": 70.0, "width": 50.0, "height": 50.0 })).unwrap();
+    let id1 = NodeId(r1["id"].as_u64().unwrap());
+    let id2 = NodeId(r2["id"].as_u64().unwrap());
+
+    // Rename shape 1
+    std::sync::Arc::make_mut(&mut session_a.doc_mut().unwrap().doc).node_mut(id1).unwrap().name = Some("CustomLogoShape".to_string());
+
+    // Select both and group them
+    select(&mut session_a, &[id1, id2]);
+    let grp_res = session_a.execute("object.group", &json!({})).unwrap();
+    let group_id = NodeId(grp_res["id"].as_u64().unwrap());
+
+    // Rename the group
+    std::sync::Arc::make_mut(&mut session_a.doc_mut().unwrap().doc).node_mut(group_id).unwrap().name = Some("BrandingGroup".to_string());
+
+    // Verify local structure
+    assert_eq!(session_a.doc().unwrap().doc.parent_of(id1), Some(group_id));
+    assert_eq!(session_a.doc().unwrap().doc.parent_of(id2), Some(group_id));
+
+    // Sync from session_a to session_b
+    let update = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &update).unwrap();
+
+    // Verify session_b received the group, child relationships, names, and Z-orders
+    let doc_b = &session_b.doc().unwrap().doc;
+    assert!(doc_b.node(group_id).is_some(), "Group node must exist on peer B");
+    assert_eq!(doc_b.node(group_id).unwrap().name, Some("BrandingGroup".to_string()));
+    assert_eq!(doc_b.parent_of(id1), Some(group_id), "Shape 1 must be child of BrandingGroup on peer B");
+    assert_eq!(doc_b.parent_of(id2), Some(group_id), "Shape 2 must be child of BrandingGroup on peer B");
+    assert_eq!(doc_b.node(id1).unwrap().name, Some("CustomLogoShape".to_string()));
+
+    // Nested hierarchy test: create a 3rd shape and group it with the existing group
+    let r3 = session_a.execute("shape.rectangle", &json!({ "x": 150.0, "y": 150.0, "width": 80.0, "height": 80.0 })).unwrap();
+    let id3 = NodeId(r3["id"].as_u64().unwrap());
+    select(&mut session_a, &[group_id, id3]);
+    let outer_grp_res = session_a.execute("object.group", &json!({})).unwrap();
+    let outer_group_id = NodeId(outer_grp_res["id"].as_u64().unwrap());
+    std::sync::Arc::make_mut(&mut session_a.doc_mut().unwrap().doc).node_mut(outer_group_id).unwrap().name = Some("HeaderContainer".to_string());
+
+    // Sync nested tree to session_b
+    let nested_update = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &nested_update).unwrap();
+
+    let doc_b_nested = &session_b.doc().unwrap().doc;
+    assert!(doc_b_nested.node(outer_group_id).is_some());
+    assert_eq!(doc_b_nested.node(outer_group_id).unwrap().name, Some("HeaderContainer".to_string()));
+    assert_eq!(doc_b_nested.parent_of(group_id), Some(outer_group_id), "Inner group must be nested inside HeaderContainer");
+    assert_eq!(doc_b_nested.parent_of(id3), Some(outer_group_id), "Shape 3 must be inside HeaderContainer");
+    assert_eq!(doc_b_nested.parent_of(id1), Some(group_id), "Shape 1 must remain inside inner BrandingGroup");
+}
+

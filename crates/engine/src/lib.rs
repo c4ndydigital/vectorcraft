@@ -1140,6 +1140,9 @@ impl Session {
     pub fn documents(&self) -> &[DocState] {
         &self.docs
     }
+    pub fn documents_mut(&mut self) -> &mut [DocState] {
+        &mut self.docs
+    }
     /// The open document with [`DocState::uid`] `uid` (it may have closed since it was looked up).
     pub fn document_mut(&mut self, uid: u64) -> Option<&mut DocState> {
         self.docs.iter_mut().find(|d| d.uid == uid)

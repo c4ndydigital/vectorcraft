@@ -247,3 +247,65 @@ fn test_crdt_group_hierarchy_and_name_sync() {
     assert_eq!(doc_b_nested.parent_of(id1), Some(group_id), "Shape 1 must remain inside inner BrandingGroup");
 }
 
+#[test]
+fn test_crdt_multi_tab_creation_and_shape_isolation() {
+    let mut session_a = session_with(800.0, 600.0);
+    let mut session_b = session_with(800.0, 600.0);
+
+    let mut bridge_a = CollabBridge::with_client_id(701);
+    let mut bridge_b = CollabBridge::with_client_id(702);
+
+    // Initial sync between A and B so B learns tab 0 ID
+    let initial_update = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &initial_update).unwrap();
+
+    // Create a shape in tab 0 on session A
+    let r_tab0 = session_a.execute("shape.rectangle", &json!({ "x": 10.0, "y": 10.0, "width": 50.0, "height": 50.0 })).unwrap();
+    let id_tab0 = NodeId(r_tab0["id"].as_u64().unwrap());
+
+    // Sync tab 0 shape to B
+    let update_tab0 = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &update_tab0).unwrap();
+    assert!(session_b.doc().unwrap().doc.node(id_tab0).is_some(), "Shape from tab 0 must be in tab 0 on peer B");
+
+    // Peer A creates a new document / tab (Tab 1)
+    session_a.execute("file.new", &json!({ "width": 1024.0, "height": 768.0 })).unwrap();
+    assert_eq!(session_a.documents().len(), 2);
+    assert_eq!(session_a.active_index(), Some(1));
+
+    // Peer A creates a shape in Tab 1
+    let r_tab1 = session_a.execute("shape.ellipse", &json!({ "x": 200.0, "y": 150.0, "width": 80.0, "height": 60.0 })).unwrap();
+    let id_tab1 = NodeId(r_tab1["id"].as_u64().unwrap());
+
+    // Give shapes distinctive names to test isolation regardless of node ID numbering
+    std::sync::Arc::make_mut(&mut session_a.doc_mut().unwrap().doc).node_mut(id_tab1).unwrap().name = Some("Tab1Ellipse".to_string());
+    session_a.set_active(0);
+    std::sync::Arc::make_mut(&mut session_a.doc_mut().unwrap().doc).node_mut(id_tab0).unwrap().name = Some("Tab0Rectangle".to_string());
+    session_a.set_active(1);
+
+    // Sync from Peer A to Peer B
+    let multi_tab_update = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &multi_tab_update).unwrap();
+
+    // Verify Peer B now has 2 documents/tabs
+    assert_eq!(session_b.documents().len(), 2, "Peer B must have 2 documents/tabs after sync");
+
+    // Verify Peer B's active focus was NOT stolen (Peer B was on tab 0 and must stay on tab 0)
+    assert_eq!(session_b.active_index(), Some(0), "Peer B active tab must remain 0 (focus not stolen)");
+
+    // Verify Tab 0 on Peer B still has the tab 0 shape and does NOT have the tab 1 shape
+    assert_eq!(
+        session_b.doc().unwrap().doc.node(id_tab0).and_then(|n| n.name.as_deref()),
+        Some("Tab0Rectangle"),
+        "Tab 0 on peer B must retain its Tab0Rectangle shape"
+    );
+
+    // Switch Peer B to Tab 1 and verify Tab 1 has the Tab1Ellipse shape
+    session_b.set_active(1);
+    assert_eq!(
+        session_b.doc().unwrap().doc.node(id_tab1).and_then(|n| n.name.as_deref()),
+        Some("Tab1Ellipse"),
+        "Tab 1 on peer B must contain the Tab1Ellipse shape"
+    );
+}
+

@@ -457,10 +457,16 @@ pub struct VectorcraftApp {
     pub collab_client_id: u64,
     /// Last document revision that has been synchronized to/from the CRDT bridge.
     pub collab_last_synced_rev: u64,
+    /// Per-document revision tracking for multi-document sync.
+    pub collab_doc_revisions: std::collections::HashMap<u64, u64>,
+    /// Last document count known to the collaboration bridge.
+    pub collab_last_doc_count: usize,
     /// Last cursor point broadcast to remote peers.
     pub last_broadcast_cursor: Option<vectorcraft_geom::Point>,
     /// Last nickname broadcast to remote peers.
     pub last_broadcast_name: String,
+    /// Last active tab index broadcast to remote peers.
+    pub last_broadcast_tab: Option<usize>,
     /// Last timestamp (app time seconds) at which cursor presence was broadcast.
     pub last_cursor_broadcast_at: f64,
     /// Custom peer nickname chosen by user in the UI.
@@ -568,8 +574,11 @@ impl VectorcraftApp {
             remote_cursors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             collab_client_id,
             collab_last_synced_rev: 0,
+            collab_doc_revisions: std::collections::HashMap::new(),
+            collab_last_doc_count: 1,
             last_broadcast_cursor: None,
             last_broadcast_name: format!("User {}", collab_client_id % 1000),
+            last_broadcast_tab: Some(0),
             last_cursor_broadcast_at: 0.0,
             collab_custom_name: String::new(),
             collab_share_copied_until: 0.0,
@@ -1017,6 +1026,10 @@ impl VectorcraftApp {
                         if let Err(e) = collab.apply_remote_update(&mut self.session, &bytes) {
                             log::warn!("collab: apply remote update error: {e}");
                         } else {
+                            for doc_st in self.session.documents() {
+                                self.collab_doc_revisions.insert(doc_st.uid, doc_st.revision);
+                            }
+                            self.collab_last_doc_count = self.session.documents().len();
                             if let Some(st) = self.session.active() {
                                 self.collab_last_synced_rev = st.revision;
                             }
@@ -1058,28 +1071,46 @@ impl VectorcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
 
-        // Check outgoing local document changes
-        if let Some(st) = self.session.active() {
-            if st.revision > self.collab_last_synced_rev {
-                if let Some(collab) = &mut self.collab {
-                    match collab.sync_from_session(&self.session) {
-                        Ok(bytes) => {
+        // Check outgoing local document changes across all open documents and tabs
+        let current_doc_count = self.session.documents().len();
+        let mut any_doc_changed = current_doc_count != self.collab_last_doc_count;
+        if !any_doc_changed {
+            for doc_st in self.session.documents() {
+                let last_rev = self.collab_doc_revisions.get(&doc_st.uid).copied().unwrap_or(0);
+                if doc_st.revision > last_rev {
+                    any_doc_changed = true;
+                    break;
+                }
+            }
+        }
+
+        if any_doc_changed {
+            if let Some(collab) = &mut self.collab {
+                match collab.sync_from_session(&self.session) {
+                    Ok(bytes) => {
+                        for doc_st in self.session.documents() {
+                            self.collab_doc_revisions.insert(doc_st.uid, doc_st.revision);
+                        }
+                        self.collab_last_doc_count = current_doc_count;
+                        if let Some(st) = self.session.active() {
                             self.collab_last_synced_rev = st.revision;
-                            if let Some(outbox) = &self.services.collab_outbox {
-                                let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
-                                if !bytes.is_empty() {
-                                    g.push(CollabOutgoing::Update(bytes));
-                                }
-                                for (key, blob) in &st.doc.images {
+                        }
+                        if let Some(outbox) = &self.services.collab_outbox {
+                            let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
+                            if !bytes.is_empty() {
+                                g.push(CollabOutgoing::Update(bytes));
+                            }
+                            for doc_st in self.session.documents() {
+                                for (key, blob) in &doc_st.doc.images {
                                     if !blob.bytes.is_empty() {
                                         g.push(CollabOutgoing::Blob { key: key.clone(), mime: blob.mime.clone(), bytes: (*blob.bytes).clone() });
                                     }
                                 }
                             }
                         }
-                        Err(e) => {
-                            log::warn!("collab: sync from session error: {e}");
-                        }
+                    }
+                    Err(e) => {
+                        log::warn!("collab: sync from session error: {e}");
                     }
                 }
             }
@@ -1089,9 +1120,11 @@ impl VectorcraftApp {
         let current_name = self.collab_peer_name();
         let name_changed = current_name != self.last_broadcast_name;
         let cursor_changed = self.hover_doc != self.last_broadcast_cursor;
+        let current_tab = self.session.active_index();
+        let tab_changed = current_tab != self.last_broadcast_tab;
         let dt = now - self.last_cursor_broadcast_at;
-        if name_changed || (cursor_changed && dt >= 0.033) || (self.hover_doc.is_some() && dt >= 1.0) {
-            if name_changed || cursor_changed || self.hover_doc.is_some() {
+        if name_changed || tab_changed || (cursor_changed && dt >= 0.033) || (self.hover_doc.is_some() && dt >= 1.0) {
+            if name_changed || tab_changed || cursor_changed || self.hover_doc.is_some() {
                 if let Some(outbox) = &self.services.collab_outbox {
                     let presence = PeerPresence {
                         client_id: self.collab_client_id,
@@ -1099,12 +1132,13 @@ impl VectorcraftApp {
                         color: self.collab_peer_color(),
                         cursor: self.hover_doc.map(|pt| vectorcraft_geom::Point::new((pt.x * 10.0).round() / 10.0, (pt.y * 10.0).round() / 10.0)),
                         last_seen: now,
-                        active_tab: self.session.active_index(),
+                        active_tab: current_tab,
                     };
                     let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
                     g.push(CollabOutgoing::Presence(presence));
                     self.last_broadcast_cursor = self.hover_doc;
                     self.last_broadcast_name = current_name;
+                    self.last_broadcast_tab = current_tab;
                     self.last_cursor_broadcast_at = now;
                 }
             }

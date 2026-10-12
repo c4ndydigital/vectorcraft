@@ -65,7 +65,7 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
             let icon = 28.0;
             let search = room >= 64.0 + 8.0 + gap + icon;
             let ws_w = ws_w.min(room - 8.0 - gap - if search { icon } else { 0.0 }).max(64.0);
-            let discord = search && room >= ws_w + 8.0 + gap + icon + 10.0 + gap + crate::community::discord_width(ui, false);
+            let _discord = search && room >= ws_w + 8.0 + gap + icon + 10.0 + gap + crate::community::discord_width(ui, false);
             let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)));
             let ui = &mut rui;
             // Workspace switcher: shows the current workspace, opens Window → Workspace.
@@ -459,16 +459,22 @@ pub fn doc_tabs(app: &mut VectorcraftApp, ui: &mut Ui) {
         ui.painter().galley(egui::pos2(title_left, r.center().y - galley.size().y / 2.0), galley.clone(), t.text);
 
         // Teammate tab badges
-        let peers_on_tab: Vec<[u8; 4]> = if let Ok(guard) = app.remote_cursors.lock() {
-            guard.values().filter(|p| p.client_id != app.collab_client_id && p.active_tab == Some(i)).map(|p| p.color).collect()
+        let peers_on_tab: Vec<([u8; 4], String)> = if let Ok(guard) = app.remote_cursors.lock() {
+            guard.values().filter(|p| p.client_id != app.collab_client_id && p.active_tab == Some(i)).map(|p| (p.color, p.name.clone())).collect()
         } else {
             Vec::new()
         };
         let mut dot_x = if CLOSE_BEFORE_TITLE { r.right() - 12.0 } else { r.right() - 28.0 };
-        for color in peers_on_tab.into_iter().take(3) {
+        for (idx, (color, name)) in peers_on_tab.into_iter().take(3).enumerate() {
             let dot_color = egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
-            ui.painter().circle_filled(egui::pos2(dot_x, r.center().y), 3.5, dot_color);
-            dot_x -= 9.0;
+            let circle_center = egui::pos2(dot_x, r.center().y);
+            ui.painter().circle_filled(circle_center, 4.0, dot_color);
+            ui.painter().circle_stroke(circle_center, 4.0, egui::Stroke::new(1.0, egui::Color32::from_black_alpha(80)));
+            let dot_rect = egui::Rect::from_center_size(circle_center, vec2(9.0, 9.0));
+            let dot_resp = ui.interact(dot_rect, ui.id().with(("peer_tab_badge", i, idx)), Sense::hover());
+            let display_name = if name.trim().is_empty() { "Colleague".to_string() } else { name };
+            dot_resp.on_hover_text(format!("{} is viewing this tab", display_name));
+            dot_x -= 10.0;
         }
 
         if xresp.clicked() {

@@ -49,6 +49,16 @@ Generated-in-code art is original and has no file to list. This covers the defau
 | `assets/fonts/SourceSans3-Regular.ttf` | Paul D. Hunt / Adobe (released as open source) | https://github.com/adobe-fonts/source-sans | OFL-1.1 (`assets/fonts/OFL-SourceSans3.txt`) | Open-source typeface, not product iconography or artwork |
 | `assets/fonts/SourceSans3-Semibold.ttf` | Paul D. Hunt / Adobe (released as open source) | https://github.com/adobe-fonts/source-sans | OFL-1.1 (`assets/fonts/OFL-SourceSans3.txt`) | Open-source typeface, not product iconography or artwork |
 | `assets/fonts/SourceSerif4-Regular.ttf` | Frank Grießhammer / Adobe (released as open source) | https://github.com/adobe-fonts/source-serif | OFL-1.1 (`assets/fonts/OFL-SourceSerif4.txt`) | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/FiraCode-Regular.ttf` | Nikita Prokopov / The Fira Code Project Authors | https://github.com/tonsky/FiraCode | OFL-1.1 | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/Lato-Bold.ttf` | Łukasz Dziedzic / Lato Project Authors | https://github.com/clauseggers/Lato-Fonts | OFL-1.1 | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/Lato-Regular.ttf` | Łukasz Dziedzic / Lato Project Authors | https://github.com/clauseggers/Lato-Fonts | OFL-1.1 | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/Montserrat-Regular.ttf` | Julieta Ulanovsky, Sol Matas, Juan Pablo del Peral, Jacques Le Bailly / Montserrat Project Authors | https://github.com/JulietaUla/Montserrat | OFL-1.1 | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/OpenSans-Regular.ttf` | Steve Matteson / Google | https://github.com/googlefonts/opensans | OFL-1.1 | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/Oswald-Regular.ttf` | Vernon Adams, Kalapi Gajjar, Cyreal / Oswald Project Authors | https://github.com/googlefonts/OswaldFont | OFL-1.1 | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/PlayfairDisplay-Regular.ttf` | Claus Eggers Sørensen / Playfair Project Authors | https://github.com/clauseggers/Playfair-Display | OFL-1.1 | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/Poppins-Bold.ttf` | Indian Type Foundry, Jonny Pinhorn, Ninad Kale / Poppins Project Authors | https://github.com/itfoundry/Poppins | OFL-1.1 | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/Poppins-Regular.ttf` | Indian Type Foundry, Jonny Pinhorn, Ninad Kale / Poppins Project Authors | https://github.com/itfoundry/Poppins | OFL-1.1 | Open-source typeface, not product iconography or artwork |
+| `assets/fonts/Roboto-Regular.ttf` | Christian Robertson / Google | https://github.com/googlefonts/roboto | OFL-1.1 | Open-source typeface, not product iconography or artwork |
 | `assets/fonts/OFL-Inter.txt` | (licence text) | upstream project | — |  |
 | `assets/fonts/OFL-JetBrainsMono.txt` | (licence text) | upstream project | — |  |
 | `assets/fonts/OFL-SourceSans3.txt` | (licence text) | upstream project | — |  |

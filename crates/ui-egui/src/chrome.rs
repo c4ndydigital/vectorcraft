@@ -163,10 +163,21 @@ pub fn sync_window_title(app: &mut VectorcraftApp, ctx: &egui::Context) {
     let want = window_title(app);
     if app.last_window_title != want {
         app.last_window_title = want.clone();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(want));
-        // One more frame: a new title makes AppKit lay its title bar out again, putting the window
-        // buttons back where it keeps them until the next frame centres them on the bar (#968).
-        ctx.request_repaint();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(want));
+            // One more frame: a new title makes AppKit lay its title bar out again, putting the window
+            // buttons back where it keeps them until the next frame centres them on the bar (#968).
+            ctx.request_repaint();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(win) = web_sys::window() {
+                if let Some(doc) = win.document() {
+                    doc.set_title(&want);
+                }
+            }
+        }
     }
 }
 
@@ -446,6 +457,20 @@ pub fn doc_tabs(app: &mut VectorcraftApp, ui: &mut Ui) {
         let xresp = ui.interact(xr.expand(3.0), ui.id().with(("tabx", i)), Sense::click());
         icons::paint(ui, "x", xr, if xresp.hovered() { t.text_strong } else { t.text });
         ui.painter().galley(egui::pos2(title_left, r.center().y - galley.size().y / 2.0), galley.clone(), t.text);
+
+        // Teammate tab badges
+        let peers_on_tab: Vec<[u8; 4]> = if let Ok(guard) = app.remote_cursors.lock() {
+            guard.values().filter(|p| p.client_id != app.collab_client_id && p.active_tab == Some(i)).map(|p| p.color).collect()
+        } else {
+            Vec::new()
+        };
+        let mut dot_x = if CLOSE_BEFORE_TITLE { r.right() - 12.0 } else { r.right() - 28.0 };
+        for color in peers_on_tab.into_iter().take(3) {
+            let dot_color = egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
+            ui.painter().circle_filled(egui::pos2(dot_x, r.center().y), 3.5, dot_color);
+            dot_x -= 9.0;
+        }
+
         if xresp.clicked() {
             close = Some(i);
         } else if resp.clicked() {

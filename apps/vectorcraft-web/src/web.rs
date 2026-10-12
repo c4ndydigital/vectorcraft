@@ -138,6 +138,7 @@ struct Host {
 
 pub fn start() {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
+    install_test_hooks();
     let Some(canvas) = element(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
         log::error!("missing <canvas id=\"{CANVAS_ID}\">");
         return;
@@ -164,6 +165,30 @@ pub fn start() {
         track_paste(&host.pasted);
         run(host, canvas, None).await;
     });
+}
+
+/// Install JS test automation hooks on the global `window` object.
+pub fn install_test_hooks() {
+    let Some(window) = web_sys::window() else { return };
+
+    // window.__vectorcraft_get_fonts(): returns JS Array of family names
+    let get_fonts = wasm_bindgen::closure::Closure::<dyn Fn() -> js_sys::Array>::new(|| {
+        let list = vectorcraft_text::FontDb::global().menu_family_list();
+        let arr = js_sys::Array::new();
+        for f in list.iter() {
+            arr.push(&wasm_bindgen::JsValue::from_str(f));
+        }
+        arr
+    });
+
+    if let Err(e) = js_sys::Reflect::set(
+        &window,
+        &wasm_bindgen::JsValue::from_str("__vectorcraft_get_fonts"),
+        get_fonts.as_ref().unchecked_ref(),
+    ) {
+        log::error!("failed to install __vectorcraft_get_fonts test hook: {e:?}");
+    }
+    get_fonts.forget();
 }
 
 /// An app whose graphics were lost, on its way to new ones.

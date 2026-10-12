@@ -279,13 +279,14 @@ fn list(ui: &mut Ui, state_id: egui::Id, st: &mut MenuState, current: &str, samp
     let current = db.canonical(&st.current, "").0;
     let current = current.as_str();
     let favorite = |f: &str| look.favorites.iter().any(|x| x.eq_ignore_ascii_case(f));
+    let norm_query = normalize_font_name(&query);
     // The generation is read first: fonts that load meanwhile make the next frame list them.
     let key: RowsKey =
         (query.clone(), st.script, st.class, st.favorites_only, look.english_names, st.expanded.clone(), look.favorites.to_vec(), db.generation());
     if st.rows_key.as_ref() != Some(&key) {
         let wanted = |f: &str| {
             let label = db.family_display_name(f, look.english_names);
-            if !(query.is_empty() || f.to_lowercase().contains(&query) || label.to_lowercase().contains(&query)) {
+            if !font_matches_query(&query, &norm_query, f, &label) {
                 return false;
             }
             if st.favorites_only && !favorite(f) {
@@ -775,7 +776,7 @@ mod tests {
         assert_eq!(super::script_label(3), "Thai");
     }
 
-    use super::{Row, remap_highlight};
+    use super::{Row, font_matches_query, normalize_font_name, remap_highlight};
 
     fn family(name: &str) -> Row {
         Row::Family(name.to_string())
@@ -803,4 +804,38 @@ mod tests {
         assert_eq!(remap_highlight(&before, Some(1), &after), Some(2));
         assert_eq!(remap_highlight(&after, Some(1), &before), None);
     }
+
+    #[test]
+    fn normalized_font_name_matching() {
+        let query = "OpenSans";
+        let norm = normalize_font_name(query);
+        assert!(font_matches_query(query, &norm, "Open Sans", "Open Sans"));
+        assert!(font_matches_query("firacode", &normalize_font_name("firacode"), "Fira Code", "Fira Code"));
+        assert!(font_matches_query("playfair", &normalize_font_name("playfair"), "Playfair Display", "Playfair Display"));
+        assert!(!font_matches_query("roboto", &normalize_font_name("roboto"), "Open Sans", "Open Sans"));
+    }
 }
+
+pub(crate) fn normalize_font_name(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+pub(crate) fn font_matches_query(query: &str, norm_query: &str, family: &str, label: &str) -> bool {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if family.to_lowercase().contains(trimmed) || label.to_lowercase().contains(trimmed) {
+        return true;
+    }
+    if !norm_query.is_empty() {
+        if normalize_font_name(family).contains(norm_query) {
+            return true;
+        }
+        if label != family && normalize_font_name(label).contains(norm_query) {
+            return true;
+        }
+    }
+    false
+}
+

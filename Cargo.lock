@@ -5414,6 +5414,7 @@ dependencies = [
  "vectorcraft-three-d",
  "vectorcraft-tools",
  "wat",
+ "web-sys",
 ]
 
 [[package]]

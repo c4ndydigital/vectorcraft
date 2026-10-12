@@ -1468,6 +1468,9 @@ pub(crate) fn paint_remote_cursors(app: &VectorcraftApp, painter: &egui::Painter
         if client_id == app.collab_client_id {
             continue;
         }
+        if peer.active_tab.is_some() && peer.active_tab != app.session.active_index() {
+            continue;
+        }
         let Some(doc_pos) = peer.cursor else {
             continue;
         };

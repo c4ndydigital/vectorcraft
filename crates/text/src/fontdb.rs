@@ -26,6 +26,16 @@ static BUNDLED: &[&[u8]] = &[
     include_bytes!("../../../assets/fonts/Inter-Medium.ttf"),
     include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf"),
     include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/Roboto-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/OpenSans-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/Lato-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/Lato-Bold.ttf"),
+    include_bytes!("../../../assets/fonts/Montserrat-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/Poppins-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/Poppins-Bold.ttf"),
+    include_bytes!("../../../assets/fonts/PlayfairDisplay-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/Oswald-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/FiraCode-Regular.ttf"),
 ];
 
 /// An axis setting of a variable font: the axis tag (`wght`) and its value in user units (700).

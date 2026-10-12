@@ -72,11 +72,11 @@ fn about_tab(app: &mut VectorcraftApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         let t = theme::Tokens::get(ui.ctx());
         if ui.add(egui::Button::new(egui::RichText::new("Impressum").color(t.accent).size(11.0)).frame(false)).clicked() {
-            app.open_url("/impressum");
+            app.ui.impressum = true;
         }
         ui.label(egui::RichText::new("·").color(t.text_dim).size(11.0));
         if ui.add(egui::Button::new(egui::RichText::new("Datenschutz").color(t.accent).size(11.0)).frame(false)).clicked() {
-            app.open_url("/datenschutz");
+            app.ui.datenschutz = true;
         }
     });
     // The GPU the window renders with, for bug reports (Preferences › Performance picks it).

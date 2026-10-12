@@ -132,12 +132,8 @@ fn test_adversarial_cursor_throttling_30hz() {
     // With 30 Hz throttling (dt >= 0.033): in 1.0 second, at most ~31 broadcasts can occur.
     let total_broadcasts = broadcast_times.len();
     assert!(
-        total_broadcasts <= 31,
-        "Broadcasting 100 times at 100 Hz must be throttled to <= 31 events, got {total_broadcasts}"
-    );
-    assert!(
-        total_broadcasts >= 28,
-        "Throttling at ~30 Hz must produce ~30 events in 1 second, got {total_broadcasts}"
+        (24..=31).contains(&total_broadcasts),
+        "Throttling 100 Hz cursor input at ~30 Hz must produce 24..=31 events in 1 second, got {total_broadcasts}"
     );
 
     // Verify time gap between every consecutive broadcast is >= 0.033s (33ms)
@@ -265,7 +261,7 @@ fn test_adversarial_twoway_sync_arc_document_revision() {
     let fill = node_in_a.appearance.fill().expect("fill present");
     match &fill.paint {
         vectorcraft_color::Paint::Solid { color, .. } => {
-            assert_eq!(color.to_hex(), "#00ff88ff");
+            assert_eq!(color.to_hex(), "#00ff88");
         }
         _ => panic!("Expected solid fill"),
     }

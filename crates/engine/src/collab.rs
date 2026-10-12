@@ -99,7 +99,7 @@ impl CollabBridge {
         let mut shapes_to_sync = Vec::new();
 
         st.doc.walk(|node| {
-            if matches!(node.kind, NodeKind::Path { .. } | NodeKind::Compound { .. }) {
+            if matches!(node.kind, NodeKind::Path { .. } | NodeKind::Compound { .. } | NodeKind::Image(_)) {
                 let key = node.id.0.to_string();
                 active_shape_ids.insert(key.clone());
                 let parent_id = st.doc.parent_of(node.id).map(|p| p.0);

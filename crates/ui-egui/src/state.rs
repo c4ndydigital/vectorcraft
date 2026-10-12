@@ -294,6 +294,8 @@ pub struct UiState {
     /// Draw Normal / Behind / Inside.
     pub draw_mode: u8,
     pub about: bool,
+    pub impressum: bool,
+    pub datenschutz: bool,
     /// Recorded actions (Actions panel), persisted with the UI preferences.
     #[serde(default = "crate::panels::actions::default_sets")]
     pub action_sets: Vec<crate::panels::actions::ActionSet>,
@@ -499,6 +501,8 @@ impl Default for UiState {
             screen_mode: 0,
             draw_mode: 0,
             about: false,
+            impressum: false,
+            datenschutz: false,
             action_sets: crate::panels::actions::default_sets(),
             recording: None,
             shortcut_overrides: Default::default(),

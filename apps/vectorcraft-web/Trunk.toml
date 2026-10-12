@@ -4,6 +4,7 @@ target = "index.html"
 dist = "../../dist/web"
 public_url = "./"
 filehash = true
+no_sri = true
 
 [serve]
 addresses = ["127.0.0.1"]

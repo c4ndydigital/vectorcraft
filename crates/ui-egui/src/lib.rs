@@ -165,12 +165,14 @@ pub struct PeerPresence {
 pub enum CollabIncoming {
     Update(Vec<u8>),
     Presence(PeerPresence),
+    Blob { key: String, mime: String, bytes: Vec<u8> },
 }
 
 #[derive(Clone, Debug)]
 pub enum CollabOutgoing {
     Update(Vec<u8>),
     Presence(PeerPresence),
+    Blob { key: String, mime: String, bytes: Vec<u8> },
 }
 
 /// What a file dialog shows: a suggested file name (save dialogs), the folder to start in and the
@@ -802,6 +804,19 @@ impl VectorcraftApp {
                         ctx.request_repaint();
                     }
                 }
+                CollabIncoming::Blob { key, mime, bytes } => {
+                    if let Some(st) = self.session.active_mut() {
+                        let doc = std::sync::Arc::make_mut(&mut st.doc);
+                        doc.images.insert(key, vectorcraft_doc::ImageBlob {
+                            mime,
+                            bytes: std::sync::Arc::new(bytes),
+                            proxy: None,
+                        });
+                        st.revision += 1;
+                        self.canvas.key = None;
+                        ctx.request_repaint();
+                    }
+                }
             }
         }
 
@@ -822,10 +837,19 @@ impl VectorcraftApp {
                     match collab.sync_from_session(&self.session) {
                         Ok(bytes) => {
                             self.collab_last_synced_rev = st.revision;
-                            if !bytes.is_empty() {
-                                if let Some(outbox) = &self.services.collab_outbox {
-                                    let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(outbox) = &self.services.collab_outbox {
+                                let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
+                                if !bytes.is_empty() {
                                     g.push(CollabOutgoing::Update(bytes));
+                                }
+                                for (key, blob) in &st.doc.images {
+                                    if !blob.bytes.is_empty() {
+                                        g.push(CollabOutgoing::Blob {
+                                            key: key.clone(),
+                                            mime: blob.mime.clone(),
+                                            bytes: (*blob.bytes).clone(),
+                                        });
+                                    }
                                 }
                             }
                         }

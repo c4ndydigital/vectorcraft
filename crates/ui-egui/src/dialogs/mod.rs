@@ -41,6 +41,7 @@ pub mod layers_panel_options;
 pub mod liquify;
 pub mod missing_links;
 pub(crate) mod modal;
+pub mod legal;
 pub mod new_color_group;
 mod new_document;
 pub mod new_swatch;
@@ -320,6 +321,8 @@ pub fn confirm(app: &mut VectorcraftApp) -> DialogResult {
 
 pub fn show(app: &mut VectorcraftApp, ctx: &egui::Context) {
     about::show(app, ctx);
+    legal::show_impressum(app, ctx);
+    legal::show_datenschutz(app, ctx);
     // The kind of dialog shown last frame: a different one (or none) means this one just opened, and
     // its first field is to take the keyboard focus (`focus_id`, until a field takes it).
     let (shown_id, focus_id) = (egui::Id::new("dialog-shown"), egui::Id::new("dialog-focus-pending"));

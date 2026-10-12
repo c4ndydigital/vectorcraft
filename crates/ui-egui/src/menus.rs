@@ -46,7 +46,7 @@ fn sub(label: &'static str, items: Vec<Item>) -> Item {
 fn library_placeholders() -> Vec<Item> {
     vec![todo("Built-in Libraries"), todo("User Defined"), Sep, todo("Other Library…")]
 }
-use Item::Sep;
+use Item::{Header, Sep};
 
 /// UI-level commands: (id, label, shortcut, params doc).
 pub const UI_COMMANDS: &[(&str, &str, &str, &str)] = &[
@@ -1141,6 +1141,14 @@ pub fn run_ui_command(app: &mut VectorcraftApp, id: &str, p: &Value) -> Option<R
         "file.export.pdf" => io::export_pdf(app, p.clone()),
         "help.about" => {
             app.ui.about = true;
+            Ok(Value::Null)
+        }
+        "help.impressum" => {
+            app.ui.impressum = true;
+            Ok(Value::Null)
+        }
+        "help.datenschutz" => {
+            app.ui.datenschutz = true;
             Ok(Value::Null)
         }
         "help.commandPalette" => {
@@ -2501,6 +2509,7 @@ pub fn menu_tree() -> Vec<(&'static str, Vec<Item>)> {
                 c("Datenschutz", "help.datenschutz"),
                 Sep,
                 c("About VectorCraft", "help.about"),
+                Header("Based on VectorCraft by the ArtCraft team"),
             ],
         ),
     ]
@@ -3025,6 +3034,14 @@ pub fn invoke(app: &mut VectorcraftApp, id: &str, p: Value) {
         return;
     }
     // Help links: the command returns the URL; a menu click opens it (agents just get the URL).
+    if id == "help.impressum" {
+        app.ui.impressum = true;
+        return;
+    }
+    if id == "help.datenschutz" {
+        app.ui.datenschutz = true;
+        return;
+    }
     if matches!(id, "help.discord" | "help.website" | "help.appPage" | "help.github") {
         app.open_link(id);
         return;

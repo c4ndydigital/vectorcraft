@@ -496,6 +496,19 @@ impl WebShell {
                         log::error!("collab: serialize presence failed: {e}");
                     }
                 },
+                CollabOutgoing::Blob { key, mime, bytes } => {
+                    let payload = vectorcraft_ui_egui::serde_json::json!({
+                        "type": "blob",
+                        "key": key,
+                        "mime": mime,
+                        "dataBase64": vectorcraft_format::base64_encode(&bytes),
+                    });
+                    if let Ok(json) = vectorcraft_ui_egui::serde_json::to_string(&payload) {
+                        if let Err(e) = ws.send_with_str(&json) {
+                            log::error!("collab: send blob failed: {e:?}");
+                        }
+                    }
+                }
             }
         }
     }
@@ -584,11 +597,28 @@ fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws
             inbox_msg.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::Update(bytes));
             ctx_msg.request_repaint();
         } else if let Some(txt) = data.as_string() {
-            if let Ok(presence) = vectorcraft_ui_egui::serde_json::from_str::<PeerPresence>(&txt) {
-                inbox_msg.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::Presence(presence));
-                ctx_msg.request_repaint();
+            if let Ok(v) = vectorcraft_ui_egui::serde_json::from_str::<vectorcraft_ui_egui::serde_json::Value>(&txt) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("blob") {
+                    if let (Some(key), Some(mime), Some(b64)) = (
+                        v.get("key").and_then(|k| k.as_str()),
+                        v.get("mime").and_then(|m| m.as_str()),
+                        v.get("dataBase64").and_then(|d| d.as_str()),
+                    ) {
+                        if let Some(bytes) = vectorcraft_format::base64_decode(b64) {
+                            inbox_msg.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::Blob {
+                                key: key.to_string(),
+                                mime: mime.to_string(),
+                                bytes,
+                            });
+                            ctx_msg.request_repaint();
+                        }
+                    }
+                } else if let Ok(presence) = vectorcraft_ui_egui::serde_json::from_value::<PeerPresence>(v) {
+                    inbox_msg.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::Presence(presence));
+                    ctx_msg.request_repaint();
+                }
             } else {
-                log::warn!("collab: failed to parse incoming presence JSON: {txt}");
+                log::warn!("collab: failed to parse incoming JSON: {txt}");
             }
         }
     });

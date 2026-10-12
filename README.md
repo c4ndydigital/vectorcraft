@@ -18,10 +18,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/c4ndydigital/vectorcraft"><b>VectorCraft on GitHub</b></a>
+  <a href="https://vector.c4ndy.com"><img alt="Live Collaborative Web Demo" src="https://img.shields.io/badge/Live%20Demo-vector.c4ndy.com-success?style=for-the-badge&logo=googlechrome&logoColor=white"></a>
 </p>
 
-<br>
+<p align="center">
+  <a href="https://vector.c4ndy.com"><b>🎨 Test the live collaborative WebAssembly demo at vector.c4ndy.com</b></a><br>
+  <sub><i>Shallow fork of <a href="https://github.com/storytold/vectorcraft">storytold/vectorcraft</a> featuring real-time multiplayer CRDT sync, multi-room collaboration, and self-hosted server capabilities.</i></sub>
+</p>
+
 
 <p align="center">
   <img src="docs/images/shot-1-neon.png" alt="VectorCraft editing the Neon Drive poster: the title is selected, the Appearance panel shows the settings of its live Outer Glow, and the Properties panel shows its character settings" width="100%">

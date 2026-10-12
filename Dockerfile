@@ -33,10 +33,12 @@ WORKDIR /usr/src/vectorcraft
 
 # Copy workspace configuration and manifests
 COPY Cargo.toml Cargo.lock clippy.toml rustfmt.toml ./
+COPY .cargo/ .cargo/
 COPY crates/ crates/
 COPY apps/ apps/
 COPY xtask/ xtask/
 COPY assets/ assets/
+COPY contributors/ contributors/
 
 # Build production WebAssembly client bundle into dist/web and precompress
 RUN cd apps/vectorcraft-web && trunk build --release --minify

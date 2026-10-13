@@ -30,6 +30,7 @@ async fn test_font_status_endpoint() {
         },
         active_connections: Arc::new(AtomicUsize::new(0)),
         start_time: Instant::now(),
+        mcp_sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let app = server_main::build_app(state, &temp_dist);
@@ -71,6 +72,7 @@ async fn test_font_cache_hit_and_headers() {
         },
         active_connections: Arc::new(AtomicUsize::new(0)),
         start_time: Instant::now(),
+        mcp_sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let app = server_main::build_app(state, &temp_dist);
@@ -108,6 +110,7 @@ async fn test_font_path_traversal_rejection() {
         },
         active_connections: Arc::new(AtomicUsize::new(0)),
         start_time: Instant::now(),
+        mcp_sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let app = server_main::build_app(state, &temp_dist);

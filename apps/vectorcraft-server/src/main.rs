@@ -18,7 +18,7 @@ use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, 
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{Next, from_fn};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use futures_util::{SinkExt, StreamExt};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
@@ -30,6 +30,8 @@ use vectorcraft_server::{
 };
 use yrs::updates::decoder::Decode;
 use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
+
+mod mcp;
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -102,17 +104,32 @@ pub struct RoomState {
     pub active_clients: Arc<AtomicUsize>,
     pub last_empty_at: Arc<Mutex<Option<Instant>>>,
     pub blobs: Arc<Mutex<HashMap<String, (String, Bytes)>>>,
+    pub mcp_server: Arc<Mutex<vectorcraft_mcp::Server>>,
 }
 
 impl RoomState {
     pub fn new() -> Self {
+        Self::new_with_id("default")
+    }
+
+    pub fn new_with_id(room_id: &str) -> Self {
         let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(1024);
+        let doc = Arc::new(Mutex::new(Doc::new()));
+        let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+        let backend = mcp::RoomBackend::new(
+            room_id.to_string(),
+            client_id,
+            doc.clone(),
+            broadcast_tx.clone(),
+        );
+        let mcp_server = Arc::new(Mutex::new(vectorcraft_mcp::Server::new(Box::new(backend))));
         Self {
-            doc: Arc::new(Mutex::new(Doc::new())),
+            doc,
             broadcast_tx,
             active_clients: Arc::new(AtomicUsize::new(0)),
             last_empty_at: Arc::new(Mutex::new(Some(Instant::now()))),
             blobs: Arc::new(Mutex::new(HashMap::new())),
+            mcp_server,
         }
     }
 
@@ -149,6 +166,7 @@ pub struct AppState {
     pub fonts_config: FontCdnConfig,
     pub active_connections: Arc<AtomicUsize>,
     pub start_time: Instant,
+    pub mcp_sessions: Arc<Mutex<HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
 }
 
 impl AppState {
@@ -161,6 +179,7 @@ impl AppState {
             dist_path,
             active_connections: Arc::new(AtomicUsize::new(0)),
             start_time: Instant::now(),
+            mcp_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -174,7 +193,7 @@ impl AppState {
             eprintln!("[server] rejection: max rooms limit ({}) reached", self.limits.max_rooms);
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
-        let room = RoomState::new();
+        let room = RoomState::new_with_id(room_id);
         rooms.insert(room_id.to_string(), room.clone());
         Ok(room)
     }
@@ -412,13 +431,75 @@ async fn font_proxy_handler(
     }
 }
 
-async fn index_handler(State(state): State<AppState>) -> impl IntoResponse {
+#[derive(Debug, serde::Deserialize)]
+pub struct IndexQuery {
+    pub room: Option<String>,
+}
+
+async fn index_handler(
+    headers: HeaderMap,
+    Query(query): Query<IndexQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    let room_id = query.room.clone().unwrap_or_else(|| "default".to_string());
+    let accept = headers.get("accept").and_then(|h| h.to_str().ok()).unwrap_or("");
+
+    if accept.contains("text/event-stream") {
+        return mcp::mcp_sse_impl(
+            room_id,
+            mcp::McpQuery {
+                room: query.room,
+                sessionId: None,
+                session_id: None,
+            },
+            state,
+        )
+        .await
+        .into_response();
+    }
+
+    if accept.contains("application/json") && !accept.contains("text/html") {
+        return mcp::mcp_discovery_impl(
+            headers,
+            room_id,
+            mcp::McpQuery {
+                room: query.room,
+                sessionId: None,
+                session_id: None,
+            },
+            state,
+        )
+        .await;
+    }
+
     let index_file = state.dist_path.join("index.html");
     match tokio::fs::read_to_string(&index_file).await {
         Ok(raw_html) => {
             let umami = UmamiConfig::from_env();
-            let body = inject_umami(&raw_html, umami.as_ref());
-            Html(body).into_response()
+            let mut body = inject_umami(&raw_html, umami.as_ref());
+
+            let mcp_meta = format!(
+                "\n  <link rel=\"mcp-server\" type=\"application/json\" href=\"/mcp?room={room_id}\">\
+                 \n  <link rel=\"mcp-sse\" type=\"text/event-stream\" href=\"/mcp/sse?room={room_id}\">\
+                 \n  <meta name=\"mcp-endpoint\" content=\"/mcp?room={room_id}\">\
+                 \n  <meta name=\"mcp-sse\" content=\"/mcp/sse?room={room_id}\">\n"
+            );
+            if let Some(pos) = body.find("</head>") {
+                body.insert_str(pos, &mcp_meta);
+            }
+
+            let mut res_headers = HeaderMap::new();
+            res_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+            if let Ok(val) = HeaderValue::from_str(&format!("</mcp?room={room_id}>; rel=\"mcp-server\", </mcp/sse?room={room_id}>; rel=\"mcp-sse\"")) {
+                res_headers.insert("link", val);
+            }
+            if let Ok(val) = HeaderValue::from_str(&format!("/mcp?room={room_id}")) {
+                res_headers.insert("x-mcp-endpoint", val);
+            }
+            if let Ok(val) = HeaderValue::from_str(&format!("/mcp/sse?room={room_id}")) {
+                res_headers.insert("x-mcp-sse", val);
+            }
+            (StatusCode::OK, res_headers, body).into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, "index.html not found\n").into_response(),
     }
@@ -629,14 +710,20 @@ pub fn build_app(state: AppState, dist_path: &Path) -> Router {
     let serve_dir = ServeDir::new(dist_path).append_index_html_on_directories(true).precompressed_br().precompressed_gzip();
 
     Router::new()
-        .route("/", get(index_handler))
-        .route("/index.html", get(index_handler))
+        .route("/", get(index_handler).post(mcp::mcp_direct_rpc_handler))
+        .route("/index.html", get(index_handler).post(mcp::mcp_direct_rpc_handler))
         .route("/health", get(health_handler))
         .route("/impressum", get(impressum_handler))
         .route("/datenschutz", get(datenschutz_handler))
         .route("/status", get(metrics_or_status_handler))
         .route("/metrics", get(metrics_or_status_handler))
         .route("/ws", get(ws_handler))
+        .route("/mcp", get(mcp::mcp_discovery_handler).post(mcp::mcp_direct_rpc_handler))
+        .route("/mcp/sse", get(mcp::mcp_sse_handler))
+        .route("/mcp/message", post(mcp::mcp_message_handler))
+        .route("/api/rooms/{room_id}/mcp", get(mcp::mcp_discovery_room_handler).post(mcp::mcp_direct_rpc_room_handler))
+        .route("/api/rooms/{room_id}/mcp/sse", get(mcp::mcp_sse_room_handler))
+        .route("/api/rooms/{room_id}/mcp/message", post(mcp::mcp_message_room_handler))
         .route("/api/rooms/{room_id}/blobs/{hash}", get(get_blob_handler).post(upload_blob_handler))
         .route("/api/fonts/status", get(font_status_handler))
         .route("/fonts/{*path}", get(font_proxy_handler))
@@ -654,6 +741,9 @@ fn print_banner(bind: &str, port: u16, dist: &Path) {
     println!("==================================================================");
     println!("  Local address:   http://{bind}:{port}");
     println!("  WebSocket sync:  ws://{bind}:{port}/ws");
+    println!("  MCP Discovery:   http://{bind}:{port}/mcp?room=default");
+    println!("  MCP SSE Stream:  http://{bind}:{port}/mcp/sse?room=default");
+    println!("  MCP JSON-RPC:    POST http://{bind}:{port}/mcp?room=default");
     println!("  Static dist:     {}", dist.display());
     println!("  Health check:    http://{bind}:{port}/health");
     println!("  Fonts CDN Proxy: http://{bind}:{port}/fonts/ (DSGVO compliant)");

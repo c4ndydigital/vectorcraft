@@ -311,7 +311,7 @@ fn test_crdt_multi_tab_creation_and_shape_isolation() {
 
 #[test]
 fn test_crdt_room_red_square_injector() {
-    let snapshot_path = std::path::Path::new("/tmp/room_snapshot.bin");
+    let snapshot_path = std::path::Path::new("/tmp/live_room_c4ndy1404.bin");
     let mut session = vectorcraft_engine::Session::new();
     let mut bridge = CollabBridge::with_client_id(777_777);
 
@@ -351,5 +351,33 @@ fn test_crdt_room_red_square_injector() {
     std::fs::write("/tmp/red_square_diff.bin", &update).unwrap();
     std::fs::write("/tmp/red_square_full.bin", &full_state).unwrap();
     println!("Exported diff update: {} bytes, full state: {} bytes", update.len(), full_state.len());
+}
+
+#[test]
+fn test_render_red_square_to_png() {
+    let snapshot_bytes = std::fs::read("/tmp/red_square_full.bin").expect("read full state");
+    let mut session = vectorcraft_engine::Session::new();
+    let mut bridge = CollabBridge::with_client_id(999);
+    
+    // In vectorcraft-web, session starts with file.new:
+    let _ = session.execute("file.new", &json!({"width": 800.0, "height": 600.0}));
+    println!("Session before apply: docs count = {}", session.documents().len());
+    
+    bridge.apply_remote_update(&mut session, &snapshot_bytes).expect("apply full state");
+    
+    println!("Session after apply: docs count = {}", session.documents().len());
+    for (i, doc_st) in session.documents().iter().enumerate() {
+        println!("Doc {}: uid={}, rev={}, artboards={:?}", i, doc_st.uid, doc_st.revision, doc_st.doc.artboards);
+        doc_st.doc.walk(|node| {
+            println!("  Node: id={}, name={:?}, kind={:?}, bounds={:?}", node.id, node.name, node.kind, node.geometric_bounds());
+        });
+        
+        let mut renderer = vectorcraft_render::Renderer::new();
+        let opts = vectorcraft_render::RenderOptions::default();
+        let img = renderer.render(&doc_st.doc, 800, 600, vectorcraft_geom::Affine::IDENTITY, &opts);
+        let png_bytes = img.to_png().expect("to png");
+        std::fs::write("/tmp/rendered_doc.png", png_bytes).expect("write png");
+        println!("Saved /tmp/rendered_doc.png!");
+    }
 }
 

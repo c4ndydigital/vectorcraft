@@ -99,6 +99,11 @@ fn drag_pos_id() -> egui::Id {
     egui::Id::new("canvas-drag-pos")
 }
 
+/// Whether the user is currently holding the primary pointer button in an active canvas tool drag.
+pub fn is_tool_drag_active(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<Drag>(drag_id()) == Some(Drag::Tool)) && ctx.input(|i| i.pointer.primary_down())
+}
+
 /// The pen pressure (0..1) of the press in progress: the force of this frame's pen or touch
 /// input, else the last one seen since the press (`pressed`: a new press, whose mouse has none
 /// until a pen reports it). A mouse presses fully (1).

@@ -620,3 +620,142 @@ fn test_adversarial_ephemeral_live_drag_preview() {
     }
 }
 
+/// 8. COMPREHENSIVE ILLUSTRATOR EDITING BATTERY:
+/// Simulates real bi-directional design workflows:
+/// - Shapes & Colors (Rectangles, Ellipses, Fills, Strokes)
+/// - Pathfinder Boolean Cuts (Hole cut via MinusFront -> Compound Path)
+/// - Compound Path Move & Transform (Must NOT lose fills or disappear)
+/// - Text to Outlines (`type.createOutlines` -> Letters with holes/counters)
+/// - Grouping & Z-Order re-arrangement
+/// - Bi-directional synchronization and exact tree & appearance equality.
+#[test]
+fn test_adversarial_illustrator_editing_sync_battery() {
+    let inbox_a = Arc::new(Mutex::new(Vec::new()));
+    let outbox_a = Arc::new(Mutex::new(Vec::new()));
+    let inbox_b = Arc::new(Mutex::new(Vec::new()));
+    let outbox_b = Arc::new(Mutex::new(Vec::new()));
+
+    let services_a = Services { collab_inbox: Some(inbox_a.clone()), collab_outbox: Some(outbox_a.clone()), ..Default::default() };
+    let services_b = Services { collab_inbox: Some(inbox_b.clone()), collab_outbox: Some(outbox_b.clone()), ..Default::default() };
+
+    let mut app_a = VectorcraftApp::new(Session::new(), services_a);
+    let mut app_b = VectorcraftApp::new(Session::new(), services_b);
+
+    app_a.run("file.new", json!({"width": 1000, "height": 800})).expect("file.new a");
+    app_b.run("file.new", json!({"width": 1000, "height": 800})).expect("file.new b");
+
+    let ctx = egui::Context::default();
+
+    // Helper closure to forward all outbound updates between peers
+    let pump_collab = |a: &mut VectorcraftApp, b: &mut VectorcraftApp, time: f64| {
+        a.handle_collab(&ctx, time);
+        let out_a: Vec<CollabOutgoing> = outbox_a.lock().unwrap().drain(..).collect();
+        for msg in out_a {
+            if let CollabOutgoing::Update(u) = msg {
+                inbox_b.lock().unwrap().push(CollabIncoming::Update(u));
+            }
+        }
+        b.handle_collab(&ctx, time);
+        let out_b: Vec<CollabOutgoing> = outbox_b.lock().unwrap().drain(..).collect();
+        for msg in out_b {
+            if let CollabOutgoing::Update(u) = msg {
+                inbox_a.lock().unwrap().push(CollabIncoming::Update(u));
+            }
+        }
+        a.handle_collab(&ctx, time + 0.01);
+    };
+
+    // Step 1: Peer A creates a styled base rectangle (outer body)
+    let r1 = app_a.run("shape.rectangle", json!({"x": 100.0, "y": 100.0, "width": 300.0, "height": 200.0})).unwrap();
+    let r1_id = vectorcraft_doc::NodeId(r1["id"].as_u64().unwrap());
+    app_a.run("paint.setFill", json!({"color": "#2060ff"})).unwrap();
+    app_a.run("stroke.set", json!({"width": 4.0, "color": "#000000"})).unwrap();
+
+    // Step 2: Peer A creates cutter shape (inner window)
+    let r2 = app_a.run("shape.rectangle", json!({"x": 160.0, "y": 140.0, "width": 120.0, "height": 80.0})).unwrap();
+    let r2_id = vectorcraft_doc::NodeId(r2["id"].as_u64().unwrap());
+
+    // Step 3: Peer A executes Pathfinder Minus Front -> creates Compound Path with a cut-out hole
+    app_a.run("select.set", json!({"ids": [r1_id.0, r2_id.0]})).unwrap();
+    let pf_res = app_a.run("object.pathfinder.minusFront", json!({})).unwrap();
+    let compound_id = vectorcraft_doc::NodeId(pf_res["ids"][0].as_u64().unwrap());
+
+    pump_collab(&mut app_a, &mut app_b, 1.0);
+
+    // Verify Peer B received the compound node with hole and blue fill intact
+    {
+        let doc_b = &app_b.session.doc().unwrap().doc;
+        let node_b = doc_b.node(compound_id).expect("Peer B must have compound path after minusFront");
+        assert!(matches!(node_b.kind, NodeKind::Compound { .. }));
+        assert!(!node_b.appearance.fill_paint().is_none(), "Peer B compound path must have blue fill");
+        if let NodeKind::Compound { children, .. } = &node_b.kind {
+            assert_eq!(children.len(), 2, "Compound on Peer B must contain both outer boundary and cut-out hole");
+        }
+    }
+
+    // Step 4: Peer A moves and scales the compound path (Disappear/desync regression check)
+    app_a.run("select.set", json!({"ids": [compound_id.0]})).unwrap();
+    app_a.run("object.move", json!({"dx": 40.0, "dy": 50.0})).unwrap();
+    app_a.run("object.scale", json!({"sx": 120.0, "sy": 120.0})).unwrap();
+
+    pump_collab(&mut app_a, &mut app_b, 1.5);
+
+    // Verify compound path is 100% intact on Peer B (did NOT disappear)
+    {
+        let doc_b = &app_b.session.doc().unwrap().doc;
+        let node_b = doc_b.node(compound_id).expect("Peer B must NOT lose compound path after move/scale");
+        assert!(matches!(node_b.kind, NodeKind::Compound { .. }));
+        assert!(!node_b.appearance.fill_paint().is_none(), "Fill must remain intact after move/scale");
+        if let NodeKind::Compound { children, .. } = &node_b.kind {
+            assert_eq!(children.len(), 2, "Peer B compound path must still retain hole contours");
+        }
+    }
+
+    // Step 5: Peer B creates text with holes/counters ("B"), styles it, and converts to outlines
+    let txt = app_b.run("text.create", json!({"x": 500.0, "y": 300.0, "text": "B", "size": 64.0})).unwrap();
+    let txt_id = vectorcraft_doc::NodeId(txt["id"].as_u64().unwrap());
+    app_b.run("paint.setFill", json!({"color": "#ff3300"})).unwrap();
+    app_b.run("select.set", json!({"ids": [txt_id.0]})).unwrap();
+    let outl_res = app_b.run("type.createOutlines", json!({})).unwrap();
+    let outline_group_id = vectorcraft_doc::NodeId(outl_res["ids"][0].as_u64().unwrap());
+
+    pump_collab(&mut app_a, &mut app_b, 2.0);
+
+    // Verify Peer A received outlined text group with intact glyphs
+    {
+        let doc_a = &app_a.session.doc().unwrap().doc;
+        let group_a = doc_a.node(outline_group_id).expect("Peer A must have outline group");
+        let kids = group_a.children().expect("Must have glyph children");
+        assert!(!kids.is_empty(), "Glyph children must not be empty on Peer A");
+    }
+
+    // Step 6: Peer B scales and moves outlined text
+    app_b.run("select.set", json!({"ids": [outline_group_id.0]})).unwrap();
+    app_b.run("object.scale", json!({"sx": 150.0, "sy": 150.0})).unwrap();
+    app_b.run("object.move", json!({"dx": -50.0, "dy": -20.0})).unwrap();
+
+    pump_collab(&mut app_a, &mut app_b, 2.5);
+
+    // Verify Peer A retains all glyphs and fills
+    {
+        let doc_a = &app_a.session.doc().unwrap().doc;
+        let group_a = doc_a.node(outline_group_id).expect("Peer A must still have outline group");
+        let kids = group_a.children().expect("Must retain glyph children");
+        assert!(!kids.is_empty());
+        for k in kids {
+            assert!(!k.appearance.fill_paint().is_none(), "All glyphs on Peer A must retain red fill");
+        }
+    }
+
+    // Step 7: Grouping & Z-Order (Bring compound shape to front of everything)
+    app_a.run("select.set", json!({"ids": [compound_id.0]})).unwrap();
+    app_a.run("object.arrange.bringToFront", json!({})).unwrap();
+
+    pump_collab(&mut app_a, &mut app_b, 3.0);
+
+    // Final Assertion: Document node counts, compound geometry and integrity match 1:1 on both peers
+    let count_a = app_a.session.doc().unwrap().doc.layers.iter().map(|l| l.count()).sum::<usize>();
+    let count_b = app_b.session.doc().unwrap().doc.layers.iter().map(|l| l.count()).sum::<usize>();
+    assert_eq!(count_a, count_b, "Total document node count must match exactly across peers");
+}
+

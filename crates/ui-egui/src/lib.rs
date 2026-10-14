@@ -1346,6 +1346,7 @@ mod tests_collab {
             cursor: Some(Point::new(450.5, 320.25)),
             last_seen: 100.5,
             active_tab: Some(0),
+            active_interaction: None,
         };
 
         let serialized = serde_json::to_string(&presence).expect("serialize presence");
@@ -1428,6 +1429,7 @@ mod tests_collab {
             cursor: Some(Point::new(200.0, 300.0)),
             last_seen: 5.0,
             active_tab: None,
+            active_interaction: None,
         };
         inbox.lock().unwrap().push(CollabIncoming::Presence(peer_presence.clone()));
 
@@ -1469,6 +1471,7 @@ mod tests_collab {
             cursor: Some(Point::new(300.0, 400.0)),
             last_seen: 10.0,
             active_tab: None,
+            active_interaction: None,
         };
         app.remote_cursors.lock().unwrap().insert(888, peer_presence);
 
@@ -1537,6 +1540,7 @@ mod tests_collab {
             cursor: Some(Point::new(400.0, 300.0)),
             last_seen: 1.0,
             active_tab: None,
+            active_interaction: None,
         };
         let outside_tl = PeerPresence {
             client_id: 102,
@@ -1545,6 +1549,7 @@ mod tests_collab {
             cursor: Some(Point::new(-5000.0, -5000.0)),
             last_seen: 1.0,
             active_tab: None,
+            active_interaction: None,
         };
         let outside_br = PeerPresence {
             client_id: 103,
@@ -1553,6 +1558,7 @@ mod tests_collab {
             cursor: Some(Point::new(50000.0, 50000.0)),
             last_seen: 1.0,
             active_tab: None,
+            active_interaction: None,
         };
         {
             let mut g = app.remote_cursors.lock().unwrap();
@@ -1607,6 +1613,7 @@ mod tests_collab {
                 cursor: Some(pt),
                 last_seen: 1.0,
                 active_tab: None,
+                active_interaction: None,
             };
             app.remote_cursors.lock().unwrap().insert(peer.client_id, peer);
         }
@@ -1629,6 +1636,7 @@ mod tests_collab {
                 cursor: Some(Point::new(100.0 + idx as f64 * 10.0, 100.0 + idx as f64 * 10.0)),
                 last_seen: 1.0,
                 active_tab: None,
+                active_interaction: None,
             };
             app.remote_cursors.lock().unwrap().insert(peer.client_id, peer);
         }
@@ -1651,6 +1659,7 @@ mod tests_collab {
                 cursor: Some(Point::new(x, y)),
                 last_seen: i as f64,
                 active_tab: None,
+                active_interaction: None,
             };
             app.remote_cursors.lock().unwrap().insert(3000, peer);
 
@@ -1677,6 +1686,7 @@ mod tests_collab {
             cursor: Some(Point::new(f64::NAN, 100.0)),
             last_seen: 1.0,
             active_tab: None,
+            active_interaction: None,
         };
         let inf_peer = PeerPresence {
             client_id: 4002,
@@ -1685,6 +1695,7 @@ mod tests_collab {
             cursor: Some(Point::new(f64::INFINITY, f64::NEG_INFINITY)),
             last_seen: 1.0,
             active_tab: None,
+            active_interaction: None,
         };
         app.remote_cursors.lock().unwrap().insert(4001, nan_peer);
         app.remote_cursors.lock().unwrap().insert(4002, inf_peer);
@@ -1759,6 +1770,7 @@ fn test_tab_isolation_and_teammate_badges() {
         cursor: Some(vectorcraft_geom::Point::new(100.0, 100.0)),
         last_seen: 1.0,
         active_tab: Some(0),
+        active_interaction: None,
     };
     // Peer on Tab 1
     let peer_tab1 = PeerPresence {
@@ -1768,6 +1780,7 @@ fn test_tab_isolation_and_teammate_badges() {
         cursor: Some(vectorcraft_geom::Point::new(200.0, 200.0)),
         last_seen: 1.0,
         active_tab: Some(1),
+        active_interaction: None,
     };
     app.remote_cursors.lock().unwrap().insert(111, peer_tab0);
     app.remote_cursors.lock().unwrap().insert(222, peer_tab1);

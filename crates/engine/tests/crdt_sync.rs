@@ -458,3 +458,114 @@ fn test_render_red_square_to_png() {
     }
 }
 
+#[test]
+fn test_crdt_pathfinder_compound_sync_and_move() {
+    let mut session_a = session_with(800.0, 600.0);
+    let mut session_b = session_with(800.0, 600.0);
+
+    let mut bridge_a = CollabBridge::with_client_id(301);
+    let mut bridge_b = CollabBridge::with_client_id(302);
+
+    // 1. Create two overlapping rectangles in session_a
+    let r1 = session_a
+        .execute("shape.rectangle", &json!({ "x": 100.0, "y": 100.0, "width": 200.0, "height": 200.0 }))
+        .unwrap();
+    let id1 = NodeId(r1["id"].as_u64().unwrap());
+    session_a.execute("paint.setFill", &json!({ "color": "#0000ff" })).unwrap();
+
+    let r2 = session_a
+        .execute("shape.rectangle", &json!({ "x": 150.0, "y": 150.0, "width": 100.0, "height": 100.0 }))
+        .unwrap();
+    let id2 = NodeId(r2["id"].as_u64().unwrap());
+
+    // 2. Run Pathfinder Minus Front (cut hole into r1)
+    select(&mut session_a, &[id1, id2]);
+    let pf_res = session_a.execute("object.pathfinder.minusFront", &json!({})).unwrap();
+    let compound_id = NodeId(pf_res["ids"][0].as_u64().unwrap());
+
+    let appearance_a = session_a.doc().unwrap().doc.node(compound_id).unwrap().appearance.clone();
+    assert!(matches!(session_a.doc().unwrap().doc.node(compound_id).unwrap().kind, vectorcraft_doc::NodeKind::Compound { .. }), "Must be a compound path");
+    assert!(!appearance_a.fill_paint().is_none(), "Compound must have blue fill");
+
+    // 3. Sync to session_b
+    let update_1 = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &update_1).unwrap();
+
+    // Verify session_b has the compound node with hole and intact appearance
+    {
+        let doc_b = &session_b.doc().unwrap().doc;
+        let node_b = doc_b.node(compound_id).expect("Compound must exist on peer B");
+        assert!(matches!(node_b.kind, vectorcraft_doc::NodeKind::Compound { .. }), "Peer B must have compound path");
+        assert_eq!(node_b.appearance, appearance_a, "Peer B must have identical appearance");
+        if let vectorcraft_doc::NodeKind::Compound { children, .. } = &node_b.kind {
+            assert_eq!(children.len(), 2, "Compound on peer B must have 2 subpaths (outer + hole)");
+        }
+    }
+
+    // 4. Move the compound shape in session_a (must NOT disappear on peer B)
+    select(&mut session_a, &[compound_id]);
+    session_a.execute("object.move", &json!({ "dx": 50.0, "dy": 30.0 })).unwrap();
+
+    let update_2 = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &update_2).unwrap();
+
+    let doc_b_moved = &session_b.doc().unwrap().doc;
+    let node_b_moved = doc_b_moved.node(compound_id).expect("Compound must NOT disappear on peer B after move");
+    assert!(matches!(node_b_moved.kind, vectorcraft_doc::NodeKind::Compound { .. }));
+    assert_eq!(node_b_moved.appearance, appearance_a, "Appearance must remain intact after move");
+    if let vectorcraft_doc::NodeKind::Compound { children, .. } = &node_b_moved.kind {
+        assert_eq!(children.len(), 2, "Compound on peer B must still have 2 subpaths after move");
+    }
+}
+
+#[test]
+fn test_crdt_text_create_outlines_and_scale() {
+    let mut session_a = session_with(800.0, 600.0);
+    let mut session_b = session_with(800.0, 600.0);
+
+    let mut bridge_a = CollabBridge::with_client_id(401);
+    let mut bridge_b = CollabBridge::with_client_id(402);
+
+    // 1. Create text with characters having counters/holes ("AB")
+    let txt = session_a
+        .execute("text.create", &json!({ "x": 100.0, "y": 200.0, "text": "AB", "size": 48.0 }))
+        .unwrap();
+    let txt_id = NodeId(txt["id"].as_u64().unwrap());
+    session_a.execute("paint.setFill", &json!({ "color": "#ff0000" })).unwrap();
+
+    // 2. Convert to outlines (produces a group containing glyph paths / compound paths)
+    select(&mut session_a, &[txt_id]);
+    let outl_res = session_a.execute("type.createOutlines", &json!({})).unwrap();
+    let group_id = NodeId(outl_res["ids"][0].as_u64().unwrap());
+
+    // 3. Sync to session_b
+    let update_1 = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &update_1).unwrap();
+
+    let num_children = {
+        let doc_b = &session_b.doc().unwrap().doc;
+        assert!(doc_b.node(group_id).is_some(), "Outlines group must exist on peer B");
+        let group_b = doc_b.node(group_id).unwrap();
+        let children_b = group_b.children().expect("Group must have glyph children");
+        assert!(!children_b.is_empty(), "Glyph children must not be empty on peer B");
+        children_b.len()
+    };
+
+    // 4. Scale the outlined glyph group in session_a
+    select(&mut session_a, &[group_id]);
+    session_a.execute("object.scale", &json!({ "sx": 150.0, "sy": 150.0 })).unwrap();
+
+    // 5. Sync scaled state to session_b
+    let update_2 = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &update_2).unwrap();
+
+    let doc_b_scaled = &session_b.doc().unwrap().doc;
+    let group_b_scaled = doc_b_scaled.node(group_id).expect("Outlines group must still exist on peer B after scale");
+    let children_b_scaled = group_b_scaled.children().expect("Group must retain glyph children after scale");
+    assert_eq!(children_b_scaled.len(), num_children, "No glyphs should disappear on peer B after scale");
+
+    for child in children_b_scaled {
+        assert!(!child.appearance.fill_paint().is_none(), "Each glyph must retain its fill appearance on peer B");
+    }
+}
+

@@ -140,8 +140,8 @@ impl TabSyncState {
                         self.synced_nodes
                             .insert(new_child.id, (Arc::clone(new_child), container_id, idx));
                     }
-                    if let Some(new_grand) = new_child.children() {
-                        let old_grand = old_child.children().map(Vec::as_slice);
+                    if let Some(new_grand) = hierarchical_children(new_child) {
+                        let old_grand = hierarchical_children(old_child).map(Vec::as_slice);
                         self.diff_container(doc, Some(new_child.id.0), old_grand, new_grand);
                     }
                 }
@@ -181,10 +181,10 @@ impl TabSyncState {
                     if Arc::ptr_eq(old_l, new_child) {
                         continue;
                     }
-                    if let Some(new_grand) = new_child.children() {
-                        self.diff_container(doc, Some(new_child.id.0), old_l.children().map(Vec::as_slice), new_grand);
+                    if let Some(new_grand) = hierarchical_children(new_child) {
+                        self.diff_container(doc, Some(new_child.id.0), hierarchical_children(old_l).map(Vec::as_slice), new_grand);
                     }
-                } else if let Some(new_grand) = new_child.children() {
+                } else if let Some(new_grand) = hierarchical_children(new_child) {
                     self.diff_container(doc, Some(new_child.id.0), None, new_grand);
                 }
             } else {
@@ -202,8 +202,8 @@ impl TabSyncState {
                         self.synced_nodes
                             .insert(new_child.id, (Arc::clone(new_child), container_id, idx));
                         if !ptr_same {
-                            if let Some(new_grand) = new_child.children() {
-                                self.diff_container(doc, Some(new_child.id.0), old_arc.children().map(Vec::as_slice), new_grand);
+                            if let Some(new_grand) = hierarchical_children(new_child) {
+                                self.diff_container(doc, Some(new_child.id.0), hierarchical_children(&old_arc).map(Vec::as_slice), new_grand);
                             }
                         }
                     }
@@ -211,7 +211,7 @@ impl TabSyncState {
                         self.dirty_nodes.insert(new_child.id);
                         self.synced_nodes
                             .insert(new_child.id, (Arc::clone(new_child), container_id, idx));
-                        if let Some(new_grand) = new_child.children() {
+                        if let Some(new_grand) = hierarchical_children(new_child) {
                             self.diff_container(doc, Some(new_child.id.0), None, new_grand);
                         }
                     }
@@ -243,7 +243,7 @@ impl TabSyncState {
     }
 
     fn populate_snapshot_container(&mut self, container: &Arc<Node>) {
-        if let Some(children) = container.children() {
+        if let Some(children) = hierarchical_children(container) {
             let child_ids: Vec<u64> = children.iter().map(|c| c.id.0).collect();
             self.layer_skeleton.insert(container.id.0, child_ids);
             for (idx, child) in children.iter().enumerate() {
@@ -251,11 +251,24 @@ impl TabSyncState {
                     self.synced_nodes
                         .insert(child.id, (Arc::clone(child), Some(container.id.0), idx));
                 }
-                if child.children().is_some() {
+                if hierarchical_children(child).is_some() {
                     self.populate_snapshot_container(child);
                 }
             }
         }
+    }
+}
+
+/// Containers that have hierarchical child shapes in the document tree.
+///
+/// NOTE: `NodeKind::Compound` (Pathfinder cuts, holes, letter shapes with counters) is an
+/// ATOMIC geometry node where subpaths represent contours/holes of one single shape with a
+/// single appearance. Its internal subpaths are NOT distinct CRDT shapes and must NOT be
+/// extracted or stripped into the Z-order skeleton.
+fn hierarchical_children(node: &Node) -> Option<&Vec<Arc<Node>>> {
+    match &node.kind {
+        NodeKind::Layer { children, .. } | NodeKind::Group { children, .. } => Some(children),
+        _ => None,
     }
 }
 
@@ -280,7 +293,9 @@ fn node_header_and_leaf_eq(a: &Arc<Node>, b: &Arc<Node>) -> bool {
 }
 
 /// Clone a `Node` for CRDT storage, stripping recursive `Group` children because
-/// child shapes are stored as individual entries keyed by `{tab_id}:{node_id}`.
+/// group child shapes are stored as individual entries keyed by `{tab_id}:{node_id}`.
+///
+/// Atomic geometry nodes like `NodeKind::Compound` retain their complete subpaths.
 fn snapshot_node_for_crdt(node: &Node) -> Node {
     let mut cloned = node.clone();
     if let NodeKind::Group { children, .. } = &mut cloned.kind {
@@ -956,9 +971,13 @@ impl CollabBridge {
                 let current_parent = doc.parent_of(node_id);
                 let target_parent = resolve_parent_container(doc, shape.parent_id);
 
-                // In-place update of geometry/style/attributes, preserving container children
+                // In-place update of geometry/style/attributes, preserving Group container children
                 if let Some(existing) = doc.node_mut(node_id) {
-                    let preserved_children = existing.children().cloned();
+                    let preserved_children = if matches!(existing.kind, NodeKind::Group { .. }) {
+                        existing.children().cloned()
+                    } else {
+                        None
+                    };
                     let mut updated_node = shape.node;
                     if let (Some(children_vec), Some(slot)) = (preserved_children, updated_node.children_mut()) {
                         *slot = children_vec;

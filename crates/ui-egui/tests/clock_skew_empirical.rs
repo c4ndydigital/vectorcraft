@@ -27,6 +27,7 @@ fn test_clock_skew_resistance_and_pruning() {
         cursor: Some(Point::new(150.0, 250.0)),
         last_seen: foreign_uptime_a,
         active_tab: None,
+        active_interaction: None,
     };
 
     inbox_b.lock().unwrap().push(CollabIncoming::Presence(peer_a_presence));
@@ -63,6 +64,7 @@ fn test_clock_skew_resistance_and_pruning() {
         cursor: Some(Point::new(180.0, 280.0)),
         last_seen: foreign_uptime_a + 5.0, // foreign clock now 10.0
         active_tab: None,
+        active_interaction: None,
     };
     inbox_b.lock().unwrap().push(CollabIncoming::Presence(updated_presence));
     app_b.handle_collab(&ctx, local_uptime_b + 5.0); // local clock 105.0

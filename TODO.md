@@ -39,5 +39,26 @@
    - Wenn große PDFs oder viele Shapes importiert werden, belegen Updates oder Blob-Übertragungen die WebSocket-Verbindung.
    - Entkopplung / Priorisierung: Cursor- und Presence-Nachrichten dürfen nicht hinter großen CRDT-Binärblobs in der Queue feststecken (Priority Outbox / separates Droppen veralteter Cursornachrichten).
 
-3. **Passwortgeschützte Räume / Private Room Auth (Optional/Roadmap)**:
+3. [x] **Pathfinder & Compound-Path / Text-Outlines Collab Sync & Disappear Fix**:
+   - **Problemstellung**:
+     - **Pathfinder / Loch ausschneiden (`Minus Front`, `Exclude`)**: Beim Ausschneiden eines Vierecks aus einem anderen Viereck verliert der 2. Browser die Füllung bzw. bildet die Schnitte als ungestylte Sub-Objekte ab. Wird das Objekt danach verschoben (`Move` / Drag-Commit), verschwindet es in einem Browser komplett.
+     - **Text in Pfade umwandeln (`Create Outlines` / `type.createOutlines`)**: Nach der Umwandlung von Text in Pfade (Gruppe von Glyphen-Pfaden / Compound Paths) und anschließendem Skalieren/Transformieren verschwinden einzelne Buchstaben im 2. Browser oder verlieren ihre Füllung (z. B. Buchstaben mit Innenlöchern wie 'o', 'e', 'a', 'p', 'b', 'd', 'B', 'A' als Compound Paths).
+   - **Ursachenanalyse & Behebung**:
+     - `NodeKind::Compound { children, rule }` wird nun in `collab.rs` als atomare Geometrie-Einheit behandelt (`hierarchical_children` ignoriert Compound-Subpfade).
+     - Subpfade werden nicht mehr in Einzelshapes zerlegt und verbleiben als integrales Kind des Compound-Knotens.
+     - In-Place-Updates überschreiben Subpfade von Compound-Nodes vollständig und bewahren Kinder nur für echte `Group`-Knoten.
+   - **Automatisierte Regressionstests**:
+     - `crates/engine/tests/crdt_sync.rs`: `test_crdt_pathfinder_compound_sync_and_move` (Verifiziert Minus-Front-Loch, blaue Füllung und Verschieben ohne Disappear).
+     - `crates/engine/tests/crdt_sync.rs`: `test_crdt_text_create_outlines_and_scale` (Verifiziert Outlines von Buchstaben mit Punzen wie 'AB', Skalieren und Füllungs-Erhalt).
+
+4. [x] **Umfassende Illustrator-Editing Collab Sync Testsuite (Automated End-to-End Battery)**:
+   - **Ziel & Umsetzung**:
+     - Riesiger automatisierter End-to-End-Testlauf in `crates/ui-egui/tests/collab_adversarial.rs` (`test_adversarial_illustrator_editing_sync_battery`).
+     - Simuliert zwei reale Browser-Peers (Peer A & Peer B) mit UI-Loop, In-/Outbox und wechselseitigem CRDT-Streaming.
+     - Testet Rechtecke, Konturen (Strokes), Füllungen (Fills), Pathfinder `Minus Front` (Loch-Ausschnitt), Verschieben/Skalieren von Compound-Pfaden, Text in Pfade (`type.createOutlines`), Glyphen-Skalierung und Z-Order `Bring to Front`.
+     - Assertion verifiziert am Ende 100% bit- und knotengenaue Gleichheit beider Browser-Dokumente (`assert_eq!(count_a, count_b)`).
+
+5. **Passwortgeschützte Räume / Private Room Auth (Optional/Roadmap)**:
    - Raum-PIN oder Passwortschutz im Server-Handshake (`ws_handler` & MCP endpoints), um geschützte Kollaborationsräume zu ermöglichen.
+
+

@@ -439,6 +439,8 @@ pub struct VectorcraftApp {
     pub collab_last_synced_rev: u64,
     /// Per-document revision tracking for multi-document sync.
     pub collab_doc_revisions: std::collections::HashMap<u64, u64>,
+    /// Set of image blob keys already sent to the collaboration outbox.
+    pub collab_synced_image_keys: std::collections::HashSet<String>,
     /// Last document count known to the collaboration bridge.
     pub collab_last_doc_count: usize,
     /// Last cursor point broadcast to remote peers.
@@ -556,6 +558,7 @@ impl VectorcraftApp {
             collab_client_id,
             collab_last_synced_rev: 0,
             collab_doc_revisions: std::collections::HashMap::new(),
+            collab_synced_image_keys: std::collections::HashSet::new(),
             collab_last_doc_count: 1,
             last_broadcast_cursor: None,
             last_broadcast_name: format!("User {}", collab_client_id % 1000),

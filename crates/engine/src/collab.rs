@@ -447,6 +447,54 @@ impl CollabBridge {
         let single_doc_mode = docs.len() <= 1;
         let active_idx = session.active_index();
 
+        // Detect locally closed documents/tabs and remove them from CRDT
+        let current_uids: HashSet<u64> = docs.iter().map(|d| d.uid).collect();
+        let closed_uids: Vec<(u64, String)> = self
+            .local_uid_to_tab_id
+            .iter()
+            .filter(|(uid, _)| !current_uids.contains(uid))
+            .map(|(uid, tid)| (*uid, tid.clone()))
+            .collect();
+
+        for (closed_uid, closed_tab_id) in closed_uids {
+            self.local_uid_to_tab_id.remove(&closed_uid);
+            self.tabs.remove(&mut txn, closed_tab_id.as_str());
+            self.known_tabs.remove(&closed_tab_id);
+            self.known_tab_json.remove(&closed_tab_id);
+            self.tab_states.remove(&closed_tab_id);
+
+            // Remove all CRDT shapes and cached metadata belonging to this tab
+            let tab_prefix = format!("{}:", closed_tab_id);
+            let shapes_to_remove: Vec<String> = self
+                .known_shape_meta
+                .iter()
+                .filter(|(k, meta)| meta.tab_id == closed_tab_id || k.starts_with(&tab_prefix))
+                .map(|(k, _)| k.clone())
+                .collect();
+
+            for shape_key in shapes_to_remove {
+                self.shapes.remove(&mut txn, shape_key.as_str());
+                self.known_shape_keys.remove(&shape_key);
+                self.known_shape_json.remove(&shape_key);
+                self.known_shape_meta.remove(&shape_key);
+            }
+
+            // Also check all keys currently in CRDT shapes map starting with tab_prefix
+            let crdt_shapes_to_remove: Vec<String> = self
+                .shapes
+                .keys(&txn)
+                .filter(|k| k.starts_with(&tab_prefix))
+                .map(|k| k.to_string())
+                .collect();
+            for shape_key in crdt_shapes_to_remove {
+                self.shapes.remove(&mut txn, shape_key.as_str());
+                self.known_shape_keys.remove(&shape_key);
+                self.known_shape_json.remove(&shape_key);
+                self.known_shape_meta.remove(&shape_key);
+            }
+        }
+        rebuild_known_shapes_set(&mut self.known_shapes, &self.known_shape_meta);
+
         for (idx, st) in docs.iter().enumerate() {
             let tab_id = if let Some(existing_id) = self.local_uid_to_tab_id.get(&st.uid) {
                 existing_id.clone()
@@ -632,6 +680,21 @@ impl CollabBridge {
                 }
             }
         }
+        // Detect tabs deleted remotely from CRDT
+        let crdt_tab_keys: HashSet<String> = self.tabs.keys(&txn).map(|s| s.to_string()).collect();
+        let removed_tab_ids: Vec<String> = self
+            .known_tabs
+            .keys()
+            .filter(|tid| !crdt_tab_keys.contains(*tid))
+            .cloned()
+            .collect();
+
+        for removed_tid in &removed_tab_ids {
+            self.known_tabs.remove(removed_tid);
+            self.known_tab_json.remove(removed_tid);
+            self.tab_states.remove(removed_tid);
+        }
+
         remote_tabs.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
 
         // 2. Read shapes from CRDT shapes map, deserializing ONLY shapes whose JSON changed
@@ -707,6 +770,28 @@ impl CollabBridge {
         let initial_active = session.active_index();
         let mut newly_bound_tabs = HashSet::new();
 
+        // 3a. Remove local documents corresponding to tabs removed remotely in CRDT
+        if !remote_tabs.is_empty() {
+            let remote_tab_id_set: HashSet<&str> = remote_tabs.iter().map(|t| t.id.as_str()).collect();
+            let mut uids_to_close = Vec::new();
+
+            for (&uid, tid) in &self.local_uid_to_tab_id {
+                if !remote_tab_id_set.contains(tid.as_str()) {
+                    uids_to_close.push((uid, tid.clone()));
+                }
+            }
+
+            for (uid, tid) in uids_to_close {
+                self.local_uid_to_tab_id.remove(&uid);
+                self.tab_states.remove(&tid);
+                if let Some(doc_idx) = session.documents().iter().position(|d| d.uid == uid) {
+                    if session.documents().len() > 1 {
+                        session.close_document(doc_idx);
+                    }
+                }
+            }
+        }
+
         if !remote_tabs.is_empty() {
             for remote_tab in &remote_tabs {
                 let already_mapped = self.local_uid_to_tab_id.values().any(|tid| tid == &remote_tab.id);
@@ -719,6 +804,15 @@ impl CollabBridge {
                     if let Some(uid) = unmapped_uid {
                         self.local_uid_to_tab_id.insert(uid, remote_tab.id.clone());
                         newly_bound_tabs.insert(remote_tab.id.clone());
+                        if let Some(doc_st) = session.documents_mut().iter_mut().find(|d| d.uid == uid) {
+                            let doc = Arc::make_mut(&mut doc_st.doc);
+                            if !remote_tab.artboards.is_empty() {
+                                doc.artboards = remote_tab.artboards.clone();
+                            }
+                            if let Some(first_ab) = doc.artboards.first_mut() {
+                                first_ab.name = remote_tab.title.clone();
+                            }
+                        }
                     } else {
                         let (w, h) = remote_tab
                             .artboards
@@ -913,17 +1007,16 @@ impl CollabBridge {
                 let default_layer_id = doc.default_layer();
                 for container in containers_to_sort {
                     let explicit_order: Option<&Vec<u64>> = remote_tab.and_then(|rt| {
-                        let raw_key = container.map_or(0, |id| id.0);
-                        rt.z_order.get(&raw_key).or_else(|| {
-                            if container.is_some() && container == default_layer_id {
-                                rt.z_order
-                                    .iter()
-                                    .find(|&(k, _)| *k != 0)
-                                    .map(|(_, v)| v)
-                            } else {
-                                None
-                            }
-                        })
+                        match container {
+                            None => rt.z_order.get(&0),
+                            Some(cid) => rt.z_order.get(&cid.0).or_else(|| {
+                                if Some(cid) == default_layer_id {
+                                    rt.z_order.iter().find(|&(k, _)| *k != 0).map(|(_, v)| v)
+                                } else {
+                                    None
+                                }
+                            }),
+                        }
                     });
 
                     let order_positions: HashMap<u64, usize> = explicit_order
@@ -952,6 +1045,9 @@ impl CollabBridge {
             }
 
             doc.fix_next_id();
+            if st.active_layer.is_none() || !st.active_layer.is_some_and(|l| doc.node(l).is_some_and(|n| n.is_layer())) {
+                st.active_layer = doc.default_layer();
+            }
             st.selection.objects.retain(|id| doc.node(*id).is_some());
             if let Some(k) = st.selection.key {
                 if doc.node(k).is_none() {

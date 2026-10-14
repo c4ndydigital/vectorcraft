@@ -310,6 +310,83 @@ fn test_crdt_multi_tab_creation_and_shape_isolation() {
 }
 
 #[test]
+fn test_crdt_multi_tab_close_sync() {
+    let mut session_a = session_with(800.0, 600.0);
+    let mut session_b = session_with(800.0, 600.0);
+
+    let mut bridge_a = CollabBridge::with_client_id(801);
+    let mut bridge_b = CollabBridge::with_client_id(802);
+
+    // Initial sync
+    let init_update = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &init_update).unwrap();
+
+    // Create a shape in tab 0
+    let r0 = session_a.execute("shape.rectangle", &json!({ "x": 10.0, "y": 10.0, "width": 50.0, "height": 50.0 })).unwrap();
+    let id_tab0 = NodeId(r0["id"].as_u64().unwrap());
+
+    // Peer A adds a second tab (Tab 1) with an ellipse
+    session_a.execute("file.new", &json!({ "width": 1024.0, "height": 768.0 })).unwrap();
+    let _r1 = session_a.execute("shape.ellipse", &json!({ "x": 200.0, "y": 150.0, "width": 80.0, "height": 60.0 })).unwrap();
+
+    // Sync from Peer A to Peer B
+    let update_open = bridge_a.sync_from_session(&session_a).unwrap();
+    bridge_b.apply_remote_update(&mut session_b, &update_open).unwrap();
+
+    assert_eq!(session_a.documents().len(), 2);
+    assert_eq!(session_b.documents().len(), 2);
+    assert_eq!(bridge_a.tabs_count(), 2);
+    assert_eq!(bridge_b.tabs_count(), 2);
+
+    // Now Peer A closes Tab 1
+    let closed = session_a.close_document(1);
+    assert!(closed, "session_a should close tab 1");
+    assert_eq!(session_a.documents().len(), 1);
+
+    // Sync close from Peer A to Peer B
+    let update_close = bridge_a.sync_from_session(&session_a).unwrap();
+    assert!(!update_close.is_empty(), "Close update should produce CRDT delta bytes");
+    assert_eq!(bridge_a.tabs_count(), 1, "Bridge A should have only 1 tab tracked in CRDT");
+
+    bridge_b.apply_remote_update(&mut session_b, &update_close).unwrap();
+
+    // Verify Peer B now has only 1 document/tab as well!
+    assert_eq!(session_b.documents().len(), 1, "Peer B must close tab 1 in response to remote close");
+    assert_eq!(bridge_b.tabs_count(), 1, "Bridge B should have only 1 tab tracked in CRDT");
+
+    // Verify Tab 0 on both peers still has the tab 0 shape intact
+    assert!(session_a.doc().unwrap().doc.node(id_tab0).is_some());
+    assert!(session_b.doc().unwrap().doc.node(id_tab0).is_some());
+
+    // Verify Tab 1's shape is no longer tracked anywhere in CRDT
+    assert_eq!(bridge_a.shapes_count(), 1, "Only Tab 0 shape remains in Bridge A");
+    assert_eq!(bridge_b.shapes_count(), 1, "Only Tab 0 shape remains in Bridge B");
+
+    // Two-way verification: Peer B opens a new tab and then closes it
+    session_b.execute("file.new", &json!({ "width": 500.0, "height": 500.0 })).unwrap();
+    let _r_b2 = session_b.execute("shape.rectangle", &json!({ "x": 30.0, "y": 30.0, "width": 40.0, "height": 40.0 })).unwrap();
+
+    let b_open_update = bridge_b.sync_from_session(&session_b).unwrap();
+    bridge_a.apply_remote_update(&mut session_a, &b_open_update).unwrap();
+
+    assert_eq!(session_a.documents().len(), 2);
+    assert_eq!(session_b.documents().len(), 2);
+
+    // Peer B closes this newly created tab (index 1)
+    let closed_b = session_b.close_document(1);
+    assert!(closed_b);
+    let b_close_update = bridge_b.sync_from_session(&session_b).unwrap();
+    bridge_a.apply_remote_update(&mut session_a, &b_close_update).unwrap();
+
+    assert_eq!(session_a.documents().len(), 1, "Peer A must have 1 document after Peer B closes tab");
+    assert_eq!(session_b.documents().len(), 1, "Peer B must have 1 document");
+    assert_eq!(bridge_a.tabs_count(), 1);
+    assert_eq!(bridge_b.tabs_count(), 1);
+    assert_eq!(bridge_a.shapes_count(), 1);
+    assert_eq!(bridge_b.shapes_count(), 1);
+}
+
+#[test]
 fn test_crdt_room_red_square_injector() {
     let snapshot_path = std::path::Path::new("/tmp/live_room_c4ndy1404.bin");
     let mut session = vectorcraft_engine::Session::new();

@@ -109,6 +109,8 @@ impl VectorcraftApp {
                         if let Err(e) = collab.apply_remote_update(&mut self.session, &bytes) {
                             log::warn!("collab: apply remote update error: {e}");
                         } else {
+                            let current_uids: std::collections::HashSet<u64> = self.session.documents().iter().map(|d| d.uid).collect();
+                            self.collab_doc_revisions.retain(|uid, _| current_uids.contains(uid));
                             for doc_st in self.session.documents() {
                                 self.collab_doc_revisions.insert(doc_st.uid, doc_st.revision);
                             }
@@ -135,12 +137,24 @@ impl VectorcraftApp {
                 CollabIncoming::Blob { key, mime, bytes } => {
                     if active_drag {
                         deferred_incoming.push(CollabIncoming::Blob { key, mime, bytes });
-                    } else if let Some(st) = self.session.active_mut() {
-                        let doc = std::sync::Arc::make_mut(&mut st.doc);
-                        doc.images.insert(key, vectorcraft_doc::ImageBlob { mime, bytes: std::sync::Arc::new(bytes), proxy: None });
-                        st.revision += 1;
-                        self.canvas.key = None;
-                        ctx.request_repaint();
+                    } else {
+                        // Store the blob into all local documents that reference it or the active document
+                        self.collab_synced_image_keys.insert(key.clone());
+                        let arc_bytes = std::sync::Arc::new(bytes);
+                        let mut inserted_any = false;
+                        for st in self.session.documents_mut() {
+                            let doc = std::sync::Arc::make_mut(&mut st.doc);
+                            let needs_image = !doc.images.contains_key(&key);
+                            if needs_image {
+                                doc.images.insert(key.clone(), vectorcraft_doc::ImageBlob { mime: mime.clone(), bytes: arc_bytes.clone(), proxy: None });
+                                st.revision += 1;
+                                inserted_any = true;
+                            }
+                        }
+                        if inserted_any {
+                            self.canvas.key = None;
+                            ctx.request_repaint();
+                        }
                     }
                 }
             }
@@ -189,10 +203,15 @@ impl VectorcraftApp {
                 if let Some(collab) = &mut self.collab {
                     match collab.sync_from_session(&self.session) {
                         Ok(bytes) => {
+                            let current_uids: std::collections::HashSet<u64> = self.session.documents().iter().map(|d| d.uid).collect();
+                            self.collab_doc_revisions.retain(|uid, _| current_uids.contains(uid));
                             for doc_st in self.session.documents() {
                                 self.collab_doc_revisions.insert(doc_st.uid, doc_st.revision);
                             }
                             self.collab_last_doc_count = current_doc_count;
+                            if self.views.len() != current_doc_count {
+                                self.views = self.session.documents().iter().map(View::of).collect();
+                            }
                             if let Some(st) = self.session.active() {
                                 self.collab_last_synced_rev = st.revision;
                             }
@@ -203,7 +222,8 @@ impl VectorcraftApp {
                                 }
                                 for doc_st in self.session.documents() {
                                     for (key, blob) in &doc_st.doc.images {
-                                        if !blob.bytes.is_empty() {
+                                        if !blob.bytes.is_empty() && !self.collab_synced_image_keys.contains(key) {
+                                            self.collab_synced_image_keys.insert(key.clone());
                                             g.push(CollabOutgoing::Blob {
                                                 key: key.clone(),
                                                 mime: blob.mime.clone(),

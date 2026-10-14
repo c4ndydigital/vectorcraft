@@ -546,6 +546,26 @@ async fn handle_socket(socket: WebSocket, room: RoomState, room_id: String, stat
         return;
     }
 
+    // Send all existing stored image blobs to the newly connected client
+    let initial_blobs = {
+        let blobs_guard = match room.blobs.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        blobs_guard.clone()
+    };
+    for (key, (mime, body)) in initial_blobs {
+        let payload = serde_json::json!({
+            "type": "blob",
+            "key": key,
+            "mime": mime,
+            "dataBase64": vectorcraft_format::base64_encode(&body),
+        });
+        if let Ok(json_str) = serde_json::to_string(&payload) {
+            let _ = ws_sender.send(Message::Text(json_str.into())).await;
+        }
+    }
+
     let mut broadcast_rx = room.broadcast_tx.subscribe();
     let send_task = tokio::spawn(async move {
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
@@ -632,6 +652,23 @@ async fn handle_socket(socket: WebSocket, room: RoomState, room_id: String, stat
                     REJECTED_BY_LIMIT_COUNT.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
+
+                // If this is an image blob payload, cache it in room.blobs so new peers and reloaded sessions receive it
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if v.get("type").and_then(|t| t.as_str()) == Some("blob") {
+                        if let (Some(key), Some(mime), Some(b64)) =
+                            (v.get("key").and_then(|k| k.as_str()), v.get("mime").and_then(|m| m.as_str()), v.get("dataBase64").and_then(|d| d.as_str()))
+                        {
+                            if let Some(decoded_bytes) = vectorcraft_format::base64_decode(b64) {
+                                if room.estimated_bytes() + decoded_bytes.len() <= state.limits.max_room_bytes {
+                                    let mut blobs = room.blobs.lock().unwrap_or_else(|e| e.into_inner());
+                                    blobs.insert(key.to_string(), (mime.to_string(), Bytes::from(decoded_bytes)));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let _ = room.broadcast_tx.send(PeerMessage::Text { sender_id: client_id, data: text.to_string() });
             }
             Message::Close(_) => break,

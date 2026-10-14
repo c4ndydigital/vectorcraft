@@ -198,6 +198,37 @@ struct Moving {
     kept: bool,
 }
 
+fn generate_secure_room_id(win: &web_sys::Window) -> String {
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let length = 12; // 12 lowercase alphanumeric chars provide ~36^12 = 4.7 x 10^18 combinations
+    let mut random_bytes = vec![0u8; length];
+
+    if let Ok(crypto) = win.crypto() {
+        let js_array = js_sys::Uint8Array::new_with_length(length as u32);
+        if crypto.get_random_values_with_array_buffer_view(&js_array).is_ok() {
+            js_array.copy_to(&mut random_bytes);
+        } else {
+            for b in &mut random_bytes {
+                *b = (js_sys::Math::random() * 256.0) as u8;
+            }
+        }
+    } else {
+        for b in &mut random_bytes {
+            *b = (js_sys::Math::random() * 256.0) as u8;
+        }
+    }
+
+    let token: String = random_bytes
+        .iter()
+        .map(|&byte| {
+            let idx = (byte as usize) % CHARSET.len();
+            CHARSET[idx] as char
+        })
+        .collect();
+
+    format!("c4ndy-{}", token)
+}
+
 /// Run the app on `canvas`: the `moving` one when starting again after losing the graphics, else
 /// a new one.
 async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Moving>) {
@@ -214,8 +245,7 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
         let room_id = match existing_room {
             Some(r) => r,
             None => {
-                let rand_suffix = (js_sys::Math::random() * 9000.0) as u32 + 1000;
-                let generated = format!("c4ndy-{}", rand_suffix);
+                let generated = generate_secure_room_id(&win);
                 if let Ok(hist) = win.history() {
                     let _ = hist.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&format!("?room={generated}")));
                 }

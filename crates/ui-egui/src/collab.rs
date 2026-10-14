@@ -11,6 +11,13 @@ pub use vectorcraft_engine::collab::*;
 
 use crate::{VectorcraftApp, View};
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PeerInteraction {
+    pub bounds: vectorcraft_geom::Rect,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PeerPresence {
     pub client_id: u64,
@@ -20,6 +27,8 @@ pub struct PeerPresence {
     pub last_seen: f64,
     #[serde(default)]
     pub active_tab: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_interaction: Option<PeerInteraction>,
 }
 
 #[derive(Clone, Debug)]
@@ -242,7 +251,16 @@ impl VectorcraftApp {
             }
         }
 
-        // Outgoing cursor and tab-awareness presence updates (60 FPS during active drag, 30 FPS idle)
+        // Outgoing cursor, interaction, and tab-awareness presence updates (60 FPS during active drag, 30 FPS idle)
+        let current_interaction = if active_drag {
+            let bounds = self.selection_bounds();
+            let label = self.session.active().and_then(|d| d.interaction.as_ref()).map(|it| it.label.clone());
+            bounds.map(|b| PeerInteraction { bounds: b, label })
+        } else {
+            None
+        };
+        let interaction_changed = current_interaction != self.last_broadcast_interaction;
+
         let current_name = self.collab_peer_name();
         let name_changed = current_name != self.last_broadcast_name;
         let cursor_changed = self.hover_doc != self.last_broadcast_cursor;
@@ -250,8 +268,14 @@ impl VectorcraftApp {
         let tab_changed = current_tab != self.last_broadcast_tab;
         let dt = now - self.last_cursor_broadcast_at;
         let min_cursor_interval = if active_drag { 0.016 } else { 0.033 };
-        if name_changed || tab_changed || (cursor_changed && dt >= min_cursor_interval) || (self.hover_doc.is_some() && dt >= 1.0) {
-            if name_changed || tab_changed || cursor_changed || self.hover_doc.is_some() {
+        let should_broadcast = name_changed
+            || tab_changed
+            || interaction_changed
+            || (cursor_changed && dt >= min_cursor_interval)
+            || (self.hover_doc.is_some() && dt >= 1.0);
+
+        if should_broadcast {
+            if name_changed || tab_changed || interaction_changed || cursor_changed || self.hover_doc.is_some() {
                 if let Some(outbox) = &self.services.collab_outbox {
                     let presence = PeerPresence {
                         client_id: self.collab_client_id,
@@ -262,12 +286,14 @@ impl VectorcraftApp {
                             .map(|pt| vectorcraft_geom::Point::new((pt.x * 10.0).round() / 10.0, (pt.y * 10.0).round() / 10.0)),
                         last_seen: now,
                         active_tab: current_tab,
+                        active_interaction: current_interaction.clone(),
                     };
                     let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
                     g.push(CollabOutgoing::Presence(presence));
                     self.last_broadcast_cursor = self.hover_doc;
                     self.last_broadcast_name = current_name;
                     self.last_broadcast_tab = current_tab;
+                    self.last_broadcast_interaction = current_interaction;
                     self.last_cursor_broadcast_at = now;
                 }
             }

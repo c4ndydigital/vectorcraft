@@ -499,3 +499,124 @@ fn test_adversarial_reload_after_tab_close_and_shape_deletion() {
     );
 }
 
+/// 7. EMPIRICAL REGRESSION TEST: Live Drag & Transform Preview (Figma-Style Ephemeral Live Movement).
+///
+/// Verifies that:
+/// 1. While Peer A is dragging/transforming a shape:
+///    - `handle_collab` does NOT emit heavy CRDT updates (preventing history pollution).
+///    - `handle_collab` emits `CollabOutgoing::Presence` containing `PeerInteraction` with valid bounds and interaction label.
+/// 2. Peer B receives `CollabIncoming::Presence` and registers Peer A's `active_interaction`.
+/// 3. Upon drag release (`pointerup`), Peer A:
+///    - Emits the final committed CRDT update.
+///    - Emits `CollabOutgoing::Presence` with `active_interaction: None`, clearing the ghost box on remote peers.
+/// 4. Peer B applies the final update and clears the ephemeral ghost preview.
+#[test]
+fn test_adversarial_ephemeral_live_drag_preview() {
+    let inbox_a = Arc::new(Mutex::new(Vec::new()));
+    let outbox_a = Arc::new(Mutex::new(Vec::new()));
+    let inbox_b = Arc::new(Mutex::new(Vec::new()));
+    let outbox_b = Arc::new(Mutex::new(Vec::new()));
+
+    let services_a = Services { collab_inbox: Some(inbox_a.clone()), collab_outbox: Some(outbox_a.clone()), ..Default::default() };
+    let services_b = Services { collab_inbox: Some(inbox_b.clone()), collab_outbox: Some(outbox_b.clone()), ..Default::default() };
+
+    let mut app_a = VectorcraftApp::new(Session::new(), services_a);
+    let mut app_b = VectorcraftApp::new(Session::new(), services_b);
+
+    let doc_a = vectorcraft_doc::Document::new(800.0, 600.0);
+    let idx_a = app_a.session.add_document(doc_a, Some("Untitled-1".to_string()));
+    app_a.session.set_active(idx_a);
+
+    let ctx = egui::Context::default();
+
+    let res = app_a.session.execute("shape.rectangle", &json!({"x": 100.0, "y": 100.0, "width": 80.0, "height": 60.0})).unwrap();
+    let rect_id = res.get("id").and_then(|v| v.as_u64()).expect("rect id");
+    app_a.session.active_mut().unwrap().selection.set([vectorcraft_doc::NodeId(rect_id)]);
+
+    // Initial sync
+    app_a.handle_collab(&ctx, 1.0);
+    let initial_updates: Vec<CollabOutgoing> = outbox_a.lock().unwrap().drain(..).collect();
+    for msg in initial_updates {
+        match msg {
+            CollabOutgoing::Update(u) => inbox_b.lock().unwrap().push(CollabIncoming::Update(u)),
+            CollabOutgoing::Presence(p) => inbox_b.lock().unwrap().push(CollabIncoming::Presence(p)),
+            _ => {}
+        }
+    }
+    app_b.handle_collab(&ctx, 1.0);
+    outbox_b.lock().unwrap().clear();
+
+    // 1. Peer A begins an ephemeral drag / transform interaction
+    app_a.session.begin_interaction("Move").expect("begin_interaction");
+    assert!(app_a.is_active_drag(&ctx), "Must be active drag");
+
+    // Preview transform
+    app_a.session
+        .preview("object.transform", &json!({"matrix": [1.0, 0.0, 0.0, 1.0, 40.0, 30.0]}))
+        .expect("preview");
+
+    app_a.hover_doc = Some(vectorcraft_geom::Point::new(140.0, 130.0));
+
+    // Handle collab during drag
+    app_a.handle_collab(&ctx, 1.05);
+
+    let drag_msgs: Vec<CollabOutgoing> = outbox_a.lock().unwrap().drain(..).collect();
+    
+    // Crucial check: NO CRDT update during drag
+    let has_crdt_update = drag_msgs.iter().any(|m| matches!(m, CollabOutgoing::Update(_)));
+    assert!(!has_crdt_update, "No CRDT updates should be broadcast during active drag");
+
+    // Presence MUST contain active_interaction with valid bounds
+    let presence_msg = drag_msgs.into_iter().find_map(|m| match m {
+        CollabOutgoing::Presence(p) => Some(p),
+        _ => None,
+    }).expect("Must broadcast presence during active drag");
+
+    assert!(presence_msg.active_interaction.is_some(), "PeerPresence must include active_interaction during drag");
+    let interaction = presence_msg.active_interaction.clone().unwrap();
+    assert_eq!(interaction.label.as_deref(), Some("Move"));
+    assert!(interaction.bounds.width() > 0.0 && interaction.bounds.height() > 0.0, "Interaction bounds must be non-empty");
+
+    // Peer B receives presence
+    inbox_b.lock().unwrap().push(CollabIncoming::Presence(presence_msg));
+    app_b.handle_collab(&ctx, 1.05);
+
+    {
+        let remote_cursors = app_b.remote_cursors.lock().unwrap();
+        let peer_a_presence = remote_cursors.get(&app_a.collab_client_id).expect("Peer A in remote_cursors");
+        assert!(peer_a_presence.active_interaction.is_some(), "Peer B must have Peer A's active_interaction");
+        let remote_bounds = peer_a_presence.active_interaction.as_ref().unwrap().bounds;
+        assert_eq!(remote_bounds, interaction.bounds);
+    }
+
+    // 2. Drag ends: Peer A commits interaction
+    app_a.session.commit_interaction().expect("commit_interaction");
+    assert!(!app_a.is_active_drag(&ctx), "Active drag ended");
+
+    app_a.handle_collab(&ctx, 1.10);
+
+    let release_msgs: Vec<CollabOutgoing> = outbox_a.lock().unwrap().drain(..).collect();
+    
+    // Must now emit the final CRDT update
+    let has_final_crdt = release_msgs.iter().any(|m| matches!(m, CollabOutgoing::Update(_)));
+    assert!(has_final_crdt, "Final CRDT update must be emitted on pointerup / drag end");
+
+    // Presence MUST have active_interaction: None
+    let release_presence = release_msgs.into_iter().find_map(|m| match m {
+        CollabOutgoing::Presence(p) => Some(p),
+        _ => None,
+    }).expect("Must broadcast presence clearing active_interaction");
+
+    assert!(release_presence.active_interaction.is_none(), "active_interaction must be None after drag release");
+
+    // Peer B receives clear presence
+    inbox_b.lock().unwrap().push(CollabIncoming::Presence(release_presence));
+    app_b.handle_collab(&ctx, 1.10);
+
+    {
+        let remote_cursors = app_b.remote_cursors.lock().unwrap();
+        let peer_a_presence = remote_cursors.get(&app_a.collab_client_id).expect("Peer A in remote_cursors");
+        assert!(peer_a_presence.active_interaction.is_none(), "Ghost box must be cleared on Peer B");
+    }
+}
+

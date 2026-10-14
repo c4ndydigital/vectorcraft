@@ -167,7 +167,7 @@ pub use serde_json;
 pub use state::{UiState, View};
 pub use sysclip::{ClipboardProbeFactory, SystemClipboard};
 
-pub use collab::{CollabIncoming, CollabOutgoing, PeerPresence};
+pub use collab::{CollabIncoming, CollabOutgoing, PeerInteraction, PeerPresence};
 
 /// What a file dialog shows: a suggested file name (save dialogs), the folder to start in and the
 /// file-type filters.
@@ -449,6 +449,8 @@ pub struct VectorcraftApp {
     pub last_broadcast_name: String,
     /// Last active tab index broadcast to remote peers.
     pub last_broadcast_tab: Option<usize>,
+    /// Last ephemeral interaction preview broadcast to remote peers.
+    pub last_broadcast_interaction: Option<PeerInteraction>,
     /// Last timestamp (app time seconds) at which cursor presence was broadcast.
     pub last_cursor_broadcast_at: f64,
     /// Custom peer nickname chosen by user in the UI.
@@ -563,6 +565,7 @@ impl VectorcraftApp {
             last_broadcast_cursor: None,
             last_broadcast_name: format!("User {}", collab_client_id % 1000),
             last_broadcast_tab: Some(0),
+            last_broadcast_interaction: None,
             last_cursor_broadcast_at: 0.0,
             collab_custom_name: String::new(),
             collab_share_copied_until: 0.0,

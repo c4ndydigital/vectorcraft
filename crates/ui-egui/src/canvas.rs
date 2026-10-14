@@ -1476,6 +1476,31 @@ pub(crate) fn paint_remote_cursors(app: &VectorcraftApp, painter: &egui::Painter
         if peer.active_tab.is_some() && peer.active_tab != app.session.active_index() {
             continue;
         }
+        let peer_color = egui::Color32::from_rgba_unmultiplied(peer.color[0], peer.color[1], peer.color[2], peer.color[3]);
+
+        // Ephemeral Live Interaction Preview (Figma-Style Live Movement):
+        // If the peer is actively dragging, transforming, or moving shapes, render a translucent
+        // ghost bounding box and outline styled in the peer's accent color.
+        if let Some(interaction) = &peer.active_interaction {
+            let screen_rect = xf.rect_to_screen(interaction.bounds);
+            if screen_rect.width() > 1.0 && screen_rect.height() > 1.0 {
+                let fill_color = egui::Color32::from_rgba_unmultiplied(peer.color[0], peer.color[1], peer.color[2], 28);
+                let stroke_color = egui::Color32::from_rgba_unmultiplied(peer.color[0], peer.color[1], peer.color[2], 220);
+                painter.rect(screen_rect, CornerRadius::ZERO, fill_color, Stroke::new(1.5, stroke_color), StrokeKind::Inside);
+
+                // Small peer label badge on the ghost box top-left
+                if let Some(label) = &interaction.label {
+                    let label_origin = screen_rect.min + egui::vec2(2.0, -16.0);
+                    let label_text = format!("{}: {}", peer.name, label);
+                    let galley = painter.layout(label_text, egui::FontId::proportional(10.0), egui::Color32::WHITE, 200.0);
+                    let pad = egui::vec2(4.0, 1.0);
+                    let badge_box = egui::Rect::from_min_size(label_origin, galley.size() + pad * 2.0);
+                    painter.rect_filled(badge_box, CornerRadius::same(3), stroke_color);
+                    painter.galley(label_origin + pad, galley, egui::Color32::WHITE);
+                }
+            }
+        }
+
         let Some(doc_pos) = peer.cursor else {
             continue;
         };
@@ -1485,8 +1510,6 @@ pub(crate) fn paint_remote_cursors(app: &VectorcraftApp, painter: &egui::Painter
         if pts.len() < 7 {
             continue;
         }
-
-        let peer_color = egui::Color32::from_rgba_unmultiplied(peer.color[0], peer.color[1], peer.color[2], peer.color[3]);
 
         // Shadow halo
         painter.add(egui::Shape::closed_line(

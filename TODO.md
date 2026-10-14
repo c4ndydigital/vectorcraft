@@ -27,9 +27,13 @@
 
 ## 2. Nächste Schritte (Roadmap)
 
-1. **Live Drag & Transform Preview (Figma-Style Ephemeral Live Movement)**:
-   - Aktuell werden Dragging/Skalieren/Rotieren lokal in `preview` gehalten und erst bei `pointerup` als CRDT-Commit gesendet (verhindert CRDT-History-Bloat).
-   - Um das Live-Verschieben/Skalieren wie in Figma bei Remote-Peers flüssig sichtbar zu machen: Übertragung einer leichtgewichtigen ephemeren `PeerInteraction` / Ghost-Bounding-Box im Presence-/Cursor-Stream (oder separatem Ephemeral-Kanal), sodass Kollegen das Live-Dragging in Echtzeit sehen, ohne dass tausende Zwischenzustände im CRDT gespeichert werden müssen.
+1. [x] **Live Drag & Transform Preview (Figma-Style Ephemeral Live Movement)**:
+   - Leichtgewichtige ephemere `PeerInteraction` mit Bounding Box und Interaktions-Label (`"Move"`, `"Transform"`, etc.) im Presence-Stream (`PeerPresence`).
+   - Übertragung mit 60 FPS während aktivem Dragging/Transformieren ohne CRDT-History-Bloat.
+   - Remote-Canvas (`paint_remote_cursors`) rendert eine semitransparente Ghost-Bounding-Box in der Akzentfarbe des Peers samt Namens-Badge.
+   - Sofortiges Löschen der Ghost-Box bei `pointerup` (`active_interaction: None`) und sauberer CRDT-Commit des finalen Zustands.
+   - **Automatisierter Regressionstest**:
+     - `crates/ui-egui/tests/collab_adversarial.rs`: `test_adversarial_ephemeral_live_drag_preview` (Verifiziert CRDT-Unterdrückung während Drag, Presence-Bounds Übertragung, remote Ghost-Box und sauberes Clearen auf PointerUp).
 
 2. **Cursor-Latenz & WebSocket Head-of-Line Blocking bei großen Dokumenten / PDFs**:
    - Wenn große PDFs oder viele Shapes importiert werden, belegen Updates oder Blob-Übertragungen die WebSocket-Verbindung.

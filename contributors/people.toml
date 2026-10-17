@@ -17,6 +17,16 @@
 # To remove your names, delete your entry (or set fields empty) in a PR. The next
 # contributors.py run, and the next build, drop them.
 
+[people.c4ndydigital]
+real_name = "Adrian Jehne"
+display_name = "C4NDY Digital"
+sync_github_name = false
+
+[people.adrianjehne]
+real_name = "Adrian Jehne"
+display_name = "Adrian Jehne (C4NDY Digital)"
+sync_github_name = false
+
 [people.lollinoo]
 sync_github_name = true
 

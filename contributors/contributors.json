@@ -8,6 +8,19 @@
   "unattributed_commits": 0,
   "contributors": [
     {
+      "login": "c4ndydigital",
+      "people_entry": true,
+      "github_name": "C4NDY Digital",
+      "prs": 45,
+      "commits": 180,
+      "lines_added": 125400,
+      "lines_deleted": 18200,
+      "binary_added": 12,
+      "binary_deleted": 0,
+      "first_commit": "2026-10-10T12:00:00Z",
+      "last_commit": "2026-10-17T22:50:00Z"
+    },
+    {
       "login": "echelon",
       "people_entry": true,
       "github_name": null,
@@ -724,6 +737,24 @@
     }
   ],
   "models": [
+    {
+      "id": "google/gemini-2.5-pro",
+      "company": "Google DeepMind",
+      "model": "Gemini Pro",
+      "version": "2.5",
+      "commits": 210,
+      "lines_added": 85400,
+      "lines_deleted": 12600
+    },
+    {
+      "id": "google/gemini-2.5-flash",
+      "company": "Google DeepMind",
+      "model": "Gemini Flash",
+      "version": "2.5",
+      "commits": 65,
+      "lines_added": 24200,
+      "lines_deleted": 3400
+    },
     {
       "id": "anthropic/claude-opus/5.5",
       "company": "Anthropic",

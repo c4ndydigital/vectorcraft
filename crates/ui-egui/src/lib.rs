@@ -270,6 +270,8 @@ pub struct Services {
     /// [`Self::start_pick`]'s dialogs are sheets on the window (macOS): while one is open the app
     /// neither quits nor closes documents, as under the modal dialog before.
     pub dialogs_are_sheets: bool,
+    /// Request on-demand font downloading from the host / CDN proxy (e.g. Google Fonts / Fontsource).
+    pub request_font: Option<std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>>,
 }
 
 /// Cached canvas raster.

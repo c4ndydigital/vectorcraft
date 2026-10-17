@@ -342,7 +342,8 @@ fn mojikumi_halves_line_end_and_consecutive_punctuation() {
         layout(FontDb::global(), &t)
     };
     let solid = lay("一。", Mojikumi::None, false);
-    if (solid.glyphs[1].advance - 20.0).abs() > 2.0 {
+    let solid_bracket = lay("一「", Mojikumi::None, false);
+    if (solid.glyphs[1].advance - 20.0).abs() > 2.0 || (solid_bracket.glyphs[1].advance - 20.0).abs() > 2.0 {
         return; // no font with full-width punctuation here
     }
     for vertical_type in [false, true] {

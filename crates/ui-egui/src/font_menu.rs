@@ -87,6 +87,30 @@ const FALLBACK_SAMPLE: &str = "Sample";
 /// The script filter's choices: all, Japanese, Latin, Thai.
 const SCRIPTS: usize = 4;
 
+/// Popular Google Fonts available on-demand from the server proxy.
+pub const POPULAR_GOOGLE_FONTS: &[&str] = &[
+    "Roboto",
+    "Montserrat",
+    "Poppins",
+    "Open Sans",
+    "Lato",
+    "Inter",
+    "Oswald",
+    "Raleway",
+    "Playfair Display",
+    "Merriweather",
+    "Nunito",
+    "Rubik",
+    "Ubuntu",
+    "Lora",
+    "PT Sans",
+    "PT Serif",
+    "Work Sans",
+    "Fira Sans",
+    "Barlow",
+    "Inconsolata",
+];
+
 fn script_label(i: usize) -> &'static str {
     match i {
         1 => tl!("Japanese"),
@@ -299,10 +323,20 @@ fn list(ui: &mut Ui, state_id: egui::Id, st: &mut MenuState, current: &str, samp
             script_matches(st.script, traits) && st.class.is_none_or(|c| c == traits.class)
         };
         let mut rows: Vec<Row> = vec![];
-        for f in db.menu_family_list().iter().filter(|f| wanted(f)) {
-            rows.push(Row::Family(f.clone()));
-            if st.expanded.iter().any(|e| e.eq_ignore_ascii_case(f)) {
-                rows.extend(db.styles(f).into_iter().map(|s| Row::Style(f.clone(), s)));
+        let mut seen_families = std::collections::HashSet::new();
+        for f in db.menu_family_list().iter() {
+            seen_families.insert(f.to_lowercase());
+            if wanted(f) {
+                rows.push(Row::Family(f.clone()));
+                if st.expanded.iter().any(|e| e.eq_ignore_ascii_case(f)) {
+                    rows.extend(db.styles(f).into_iter().map(|s| Row::Style(f.clone(), s)));
+                }
+            }
+        }
+        // In web / on-demand environments, also include popular Google Fonts that are not yet loaded
+        for &gf in POPULAR_GOOGLE_FONTS {
+            if !seen_families.contains(&gf.to_lowercase()) && wanted(gf) {
+                rows.push(Row::Family(gf.to_string()));
             }
         }
         // Filter changes (including un-starring a favourite) may remove rows; expanding
@@ -690,6 +724,13 @@ pub(crate) fn apply(app: &mut VectorcraftApp, ctx: &egui::Context, pick: FontPic
                 crate::panels::set_pstate(ctx, PREVIEWING, false);
             }
             crate::panels::character::end_typing(app);
+            if let Some(req) = &app.services.request_font {
+                let db = vectorcraft_text::FontDb::global();
+                if db.face(&f, style.as_deref().unwrap_or("Regular")).is_none() {
+                    req(&f, style.as_deref().unwrap_or("Regular"));
+                    app.ui.status = format!("Loading font '{f}' on-demand...");
+                }
+            }
             let (cmd, params) = font_command(app, &f, style.as_deref());
             app.run(cmd, params).ok();
         }

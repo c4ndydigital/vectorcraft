@@ -549,10 +549,21 @@ pub async fn fetch_and_cache_font(
         format!("https://cdn.jsdelivr.net/gh/google/fonts@main/{}", clean),
         format!("https://cdn.jsdelivr.net/npm/@fontsource/{}", clean),
         format!("https://raw.githubusercontent.com/google/fonts/main/ofl/{}", clean),
+        format!("https://raw.githubusercontent.com/google/fonts/main/apache/{}", clean),
+        format!("https://raw.githubusercontent.com/google/fonts/main/ufl/{}", clean),
         format!("https://raw.githubusercontent.com/google/fonts/main/{}", clean),
     ];
 
     if let Some((family, file)) = clean.split_once('/') {
+        let norm_fam = family.to_lowercase().replace([' ', '-', '_'], "");
+        if norm_fam != family {
+            candidate_urls.push(format!("https://raw.githubusercontent.com/google/fonts/main/ofl/{}/{}", norm_fam, file));
+            candidate_urls.push(format!("https://raw.githubusercontent.com/google/fonts/main/apache/{}/{}", norm_fam, file));
+            candidate_urls.push(format!("https://raw.githubusercontent.com/google/fonts/main/ufl/{}/{}", norm_fam, file));
+            candidate_urls.push(format!("https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/{}/{}", norm_fam, file));
+            candidate_urls.push(format!("https://cdn.jsdelivr.net/gh/google/fonts@main/apache/{}/{}", norm_fam, file));
+            candidate_urls.push(format!("https://cdn.jsdelivr.net/gh/google/fonts@main/ufl/{}/{}", norm_fam, file));
+        }
         if !file.starts_with("files/") {
             candidate_urls.push(format!("https://cdn.jsdelivr.net/npm/@fontsource/{}/files/{}", family, file));
         }
@@ -570,7 +581,7 @@ pub async fn fetch_and_cache_font(
 
     for url in candidate_urls {
         let status = tokio::process::Command::new("curl")
-            .args(["-sSL", "--fail", "--max-time", "15", &url, "-o"])
+            .args(["-g", "-sSL", "--fail", "--max-time", "15", &url, "-o"])
             .arg(&tmp_file)
             .status()
             .await;

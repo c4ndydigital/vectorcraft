@@ -51,9 +51,17 @@ fn after_open_for(app: &mut VectorcraftApp, r: &Value, web: bool) {
     let Some(st) = app.session.active() else { return };
     let uid = st.uid;
     if web {
-        let n = vectorcraft_engine::cmd::fontfiles::missing_fonts(&st.doc).len();
-        if n > 0 && r["warnings"].as_array().is_none_or(Vec::is_empty) {
-            app.status(format!("{n} font(s) aren't available here: their text shows in another font"));
+        let missing = vectorcraft_engine::cmd::fontfiles::missing_fonts(&st.doc);
+        let n = missing.len();
+        if n > 0 {
+            if let Some(req) = &app.services.request_font {
+                for m in &missing {
+                    req(&m.family, &m.style);
+                }
+                app.ui.status = format!("Loading {n} missing font(s) on-demand...");
+            } else if r["warnings"].as_array().is_none_or(Vec::is_empty) {
+                app.status(format!("{n} font(s) aren't available here: their text shows in another font"));
+            }
         }
         return;
     }

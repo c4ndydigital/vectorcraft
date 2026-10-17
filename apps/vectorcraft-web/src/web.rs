@@ -721,6 +721,8 @@ fn services(
     let open_inbox = inbox.clone();
     let picked = place_inbox.clone();
     let place_ctx = ctx.clone();
+    let open_ctx = ctx.clone();
+    let font_ctx = ctx.clone();
     Services {
         // File → Place…: the picked files go to the Place dialog.
         place_async: Some(Box::new(move || {
@@ -745,7 +747,7 @@ fn services(
         place_inbox: Some(place_inbox),
         open_async: Some(Box::new(move || {
             let inbox = open_inbox.clone();
-            let ctx = ctx.clone();
+            let ctx = open_ctx.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let dialog = fileio::open_filters().fold(rfd::AsyncFileDialog::new(), |d, (name, exts)| {
                     d.add_filter(vectorcraft_ui_egui::i18n::tr_ctx(vectorcraft_ui_egui::i18n::current(), "file-filter", name), exts)
@@ -769,6 +771,9 @@ fn services(
         recovery_store: Some(Arc::new(BrowserStore { locks })),
         // File → Print: the browser's print dialog.
         print: Some(Box::new(BrowserPrint)),
+        request_font: Some(Arc::new(move |family: &str, style: &str| {
+            crate::fonts::fetch_font_on_demand(family, style, font_ctx.clone());
+        })),
         ..Default::default()
     }
 }

@@ -869,3 +869,66 @@ fn test_adversarial_outbox_cursor_priority_and_coalescing() {
     }
 }
 
+/// Adversarial Test: Room Password & PIN protection lifecycle in the client app.
+///
+/// Verifies:
+/// 1. Initial state: room is unlocked (`collab_room_protected == false`).
+/// 2. Setting a password/PIN via `set_collab_password(Some("secret42"))`:
+///    - Updates `collab_room_protected` to `true`.
+///    - Updates `collab_share_url` to include `&pin=secret42`.
+///    - Emits a `__room_auth__` blob to the outbox with `set_room_pin`.
+/// 3. Clearing the password via `set_collab_password(None)`:
+///    - Updates `collab_room_protected` to `false`.
+///    - Cleans `pin=` from `collab_share_url`.
+///    - Emits a `__room_auth__` blob to the outbox with `clear_room_pin`.
+#[test]
+fn test_adversarial_room_password_flow() {
+    let outbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let services = Services {
+        collab_outbox: Some(outbox.clone()),
+        ..Services::default()
+    };
+    let mut app = VectorcraftApp::new(Session::new(), services);
+    app.collab_room_id = "c4ndy-locktest".to_string();
+    app.collab_share_url = "https://vector.c4ndy.com/?room=c4ndy-locktest".to_string();
+
+    assert!(!app.collab_room_protected);
+    assert!(!app.collab_share_url.contains("pin="));
+
+    // 1. Activate password protection
+    app.set_collab_password(Some("secret42".to_string()));
+    assert!(app.collab_room_protected);
+    assert!(app.collab_share_url.contains("pin=secret42"));
+
+    let msgs: Vec<CollabOutgoing> = outbox.lock().unwrap().drain(..).collect();
+    assert_eq!(msgs.len(), 1);
+    match &msgs[0] {
+        CollabOutgoing::Blob { key, mime, bytes } => {
+            assert_eq!(key, "__room_auth__");
+            assert_eq!(mime, "application/json");
+            let json: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(json["type"], "set_room_pin");
+            assert_eq!(json["pin"], "secret42");
+        }
+        other => panic!("Expected Blob message, got {other:?}"),
+    }
+
+    // 2. Remove password protection
+    app.set_collab_password(None);
+    assert!(!app.collab_room_protected);
+    assert!(!app.collab_share_url.contains("pin="));
+
+    let msgs_clear: Vec<CollabOutgoing> = outbox.lock().unwrap().drain(..).collect();
+    assert_eq!(msgs_clear.len(), 1);
+    match &msgs_clear[0] {
+        CollabOutgoing::Blob { key, mime, bytes } => {
+            assert_eq!(key, "__room_auth__");
+            assert_eq!(mime, "application/json");
+            let json: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(json["type"], "clear_room_pin");
+        }
+        other => panic!("Expected Blob message, got {other:?}"),
+    }
+}
+
+

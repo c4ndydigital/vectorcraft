@@ -100,6 +100,41 @@ impl VectorcraftApp {
         ctx.request_repaint();
     }
 
+    pub fn set_collab_password(&mut self, pin: Option<String>) {
+        if let Some(pin_val) = pin {
+            self.collab_room_protected = true;
+            // Update collab_share_url with &pin=...
+            let base = self.collab_share_url.split('&').filter(|p| !p.starts_with("pin=")).collect::<Vec<_>>().join("&");
+            self.collab_share_url = format!("{base}&pin={pin_val}");
+            // Send auth update through collab outbox if present
+            if let Some(outbox) = &self.services.collab_outbox {
+                let msg = CollabOutgoing::Blob {
+                    key: "__room_auth__".to_string(),
+                    mime: "application/json".to_string(),
+                    bytes: serde_json::to_vec(&serde_json::json!({
+                        "type": "set_room_pin",
+                        "pin": pin_val,
+                    })).unwrap_or_default(),
+                };
+                outbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+            }
+        } else {
+            self.collab_room_protected = false;
+            // Remove pin=... from share URL
+            self.collab_share_url = self.collab_share_url.split('&').filter(|p| !p.starts_with("pin=")).collect::<Vec<_>>().join("&");
+            if let Some(outbox) = &self.services.collab_outbox {
+                let msg = CollabOutgoing::Blob {
+                    key: "__room_auth__".to_string(),
+                    mime: "application/json".to_string(),
+                    bytes: serde_json::to_vec(&serde_json::json!({
+                        "type": "clear_room_pin",
+                    })).unwrap_or_default(),
+                };
+                outbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+            }
+        }
+    }
+
     pub fn collab_peer_color(&self) -> [u8; 4] {
         const PEER_COLORS: [[u8; 4]; 8] = [
             [242, 78, 30, 255],  // Figma orange/red

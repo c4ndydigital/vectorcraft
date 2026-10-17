@@ -319,6 +319,7 @@ pub struct UiState {
     pub about: bool,
     pub impressum: bool,
     pub datenschutz: bool,
+    pub room_password: bool,
     /// Recorded actions (Actions panel), persisted with the UI preferences.
     #[serde(default = "crate::panels::actions::default_sets")]
     pub action_sets: Vec<crate::panels::actions::ActionSet>,
@@ -633,6 +634,7 @@ impl Default for UiState {
             about: false,
             impressum: false,
             datenschutz: false,
+            room_password: false,
             action_sets: crate::panels::actions::default_sets(),
             recording: None,
             shortcut_overrides: Default::default(),

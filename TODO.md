@@ -63,7 +63,22 @@
      - Testet Rechtecke, Konturen (Strokes), Füllungen (Fills), Pathfinder `Minus Front` (Loch-Ausschnitt), Verschieben/Skalieren von Compound-Pfaden, Text in Pfade (`type.createOutlines`), Glyphen-Skalierung und Z-Order `Bring to Front`.
      - Assertion verifiziert am Ende 100% bit- und knotengenaue Gleichheit beider Browser-Dokumente (`assert_eq!(count_a, count_b)`).
 
-5. **Passwortgeschützte Räume / Private Room Auth (Optional/Roadmap)**:
-   - Raum-PIN oder Passwortschutz im Server-Handshake (`ws_handler` & MCP endpoints), um geschützte Kollaborationsräume zu ermöglichen.
+5. [x] **Passwortgeschützte Räume / Private Room Auth (Optional/Roadmap)**:
+   - **Topbar Schloss-Icon**: Direkt neben dem "Teilen"-Button. Signalisiert mit grünem `🔒`-Icon (`lock`) geschützte Räume und dezentem `🔓`-Icon (`lock-open`) ungeschützte Räume mit Tooltips.
+   - **Passwort-Modal (`show_room_password`)**: Aufrufbar via Klick aufs Schloss-Icon (analog zum About/Datenschutz-Dialog). Erlaubt das Aktivieren, Ändern sowie vollständige Entfernen des Raum-Passworts (`Schutz aufheben`).
+   - **Client-Sync & Share-URL**: `set_collab_password` aktualisiert den Freigabelink automatisch (`&pin=...`) und sendet `__room_auth__`-Blobs über die Collab-Outbox an den Server.
+   - **Server-Handshake & MCP-Auth**:
+     - `ws_handler` validiert `pin` / `password` Query-Parameter und lehnt unautorisierte Anfragen mit `401 Unauthorized` ab. Initialisiert bei neuen Räumen das Passwort.
+     - `handle_socket` verarbeitet `__room_auth__`-Blobs zum Live-Setzen und Entfernen des Passworts im laufenden Raum.
+     - MCP Discovery & SSE/RPC-Endpoints (`mcp_discovery_impl`, `mcp_message_impl`) prüfen Raum-PINs und lehnen unberechtigten Zugriff ab.
+   - **Automatisierte Regressionstests**:
+     - `apps/vectorcraft-server/src/main.rs`: `test_room_password_auth_flow` (Verifiziert Pin-Setzen, 401 Rejection bei fehlendem/falschem Pin, 200 OK bei korrektem Pin und Pin-Clearen).
+     - `crates/ui-egui/tests/collab_adversarial.rs`: `test_adversarial_room_password_flow` (Verifiziert Lock-Status, URL `&pin=...`-Formatierung und `__room_auth__` Outbox-Deltas beim Setzen/Entfernen).
+   - **WASM-Build**: `trunk build --release` erfolgreich kompiliert (`✅ success`).
+
+6. [x] **Automatisches Festplatten- & Target-Cache Management (`clean_target.sh`)**:
+   - `scripts/clean_target.sh`: Überwacht Festplattenplatz und bereinigt inkrementellen Cache / alte Test-Binaries / `cargo clean`, sobald `target` > 15 GB oder freier Festplattenplatz < 20 GB fällt, um Compiler-Abstürze durch vollgelaufene Festplatte zuverlässig zu verhindern.
+
+
 
 

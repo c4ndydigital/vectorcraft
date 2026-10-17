@@ -112,6 +112,34 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                 "Diesen Raum mit anderen teilen (Link kopieren)\n\nHinweis: Räume werden nach Verlassen aller Teilnehmer gelöscht. Bitte lokal speichern.",
             );
 
+            ui.add_space(4.0);
+            let is_protected = app.collab_room_protected;
+            let lock_icon = if is_protected { "lock" } else { "lock-open" };
+            let lock_tip = if is_protected {
+                "Raum ist passwortgeschützt (Klicken zum Ändern oder Entfernen)"
+            } else {
+                "Raum-Passwort festlegen (Kollaboration absichern)"
+            };
+            let (lr, lresp) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
+            let lock_bg = if is_protected {
+                Color32::from_rgba_unmultiplied(10, 207, 131, 35)
+            } else if lresp.hovered() {
+                t.hover
+            } else {
+                Color32::TRANSPARENT
+            };
+            ui.painter().rect_filled(lr, CornerRadius::same(12), lock_bg);
+            let lock_color = if is_protected {
+                Color32::from_rgb(10, 207, 131)
+            } else {
+                t.icon
+            };
+            icons::paint(ui, lock_icon, lr.shrink(5.0), lock_color);
+            if lresp.clicked() {
+                app.ui.room_password = true;
+            }
+            lresp.on_hover_text(lock_tip);
+
             ui.add_space(6.0);
             let pcolor = app.collab_peer_color();
             let peer_c32 = Color32::from_rgba_unmultiplied(pcolor[0], pcolor[1], pcolor[2], pcolor[3]);

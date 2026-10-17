@@ -94,3 +94,82 @@ pub fn show_datenschutz(app: &mut VectorcraftApp, ctx: &egui::Context) {
         });
     app.ui.datenschutz = open && !close;
 }
+
+/// Show room password configuration modal window if `app.ui.room_password` is active.
+pub fn show_room_password(app: &mut VectorcraftApp, ctx: &egui::Context) {
+    if !app.ui.room_password {
+        return;
+    }
+    let mut open = true;
+    let mut close = false;
+    egui::Window::new(tl!("Raum-Passwort & Zugriffsschutz"))
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
+        .default_size(egui::vec2(420.0, 240.0))
+        .frame(egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::same(18)))
+        .show(ctx, |ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Kollaborationsraum schützen").font(theme::semibold(16.0)));
+                ui.add_space(4.0);
+                ui.label(
+                    "Lege eine PIN oder ein Passwort für diesen Raum fest. \
+                     Neue Teilnehmer müssen dieses Passwort eingeben oder über den geschützten Freigabelink beitreten.",
+                );
+                ui.add_space(12.0);
+
+                let is_protected = app.collab_room_protected;
+                let t = theme::Tokens::get(ui.ctx());
+
+                ui.horizontal(|ui| {
+                    if is_protected {
+                        ui.label(egui::RichText::new("Status:").font(theme::semibold(13.0)));
+                        ui.label(egui::RichText::new("🔒 Passwortgeschützt").color(egui::Color32::from_rgb(10, 207, 131)).font(theme::semibold(13.0)));
+                    } else {
+                        ui.label(egui::RichText::new("Status:").font(theme::semibold(13.0)));
+                        ui.label(egui::RichText::new("🔓 Öffentlich (kein Passwort)").color(t.text_dim));
+                    }
+                });
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Passwort / PIN:");
+                    let edit = egui::TextEdit::singleline(&mut app.collab_password_input)
+                        .password(true)
+                        .hint_text("z. B. GeheimesPasswort123")
+                        .desired_width(180.0);
+                    ui.add(edit);
+                });
+
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(if is_protected { "Passwort aktualisieren" } else { "Passwort aktivieren" })).clicked() {
+                        let trimmed = app.collab_password_input.trim().to_string();
+                        if !trimmed.is_empty() {
+                            app.set_collab_password(Some(trimmed));
+                            close = true;
+                        }
+                    }
+
+                    if is_protected && ui.add(egui::Button::new(egui::RichText::new("Schutz aufheben").color(egui::Color32::from_rgb(242, 78, 30)))).clicked() {
+                        app.set_collab_password(None);
+                        app.collab_password_input.clear();
+                        close = true;
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Schließen").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        });
+    app.ui.room_password = open && !close;
+}
+

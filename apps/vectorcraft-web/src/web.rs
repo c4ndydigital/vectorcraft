@@ -84,8 +84,8 @@ pub mod ws {
     }
 }
 
-/// Dynamically resolve WebSocket URL for collaboration sync: ws://{host}/ws?room={room_id} (or wss://).
-pub fn resolve_ws_url(room_id: &str) -> Result<String, String> {
+/// Dynamically resolve WebSocket URL for collaboration sync: ws://{host}/ws?room={room_id}[&pin={pin}] (or wss://).
+pub fn resolve_ws_url(room_id: &str, pin: Option<&str>) -> Result<String, String> {
     let window = web_sys::window().ok_or_else(|| "missing window".to_string())?;
     let location = window.location();
     let host = location.host().map_err(|e| format!("couldn't get location.host: {e:?}"))?;
@@ -94,7 +94,8 @@ pub fn resolve_ws_url(room_id: &str) -> Result<String, String> {
     }
     let protocol = location.protocol().map_err(|e| format!("couldn't get location.protocol: {e:?}"))?;
     let ws_protocol = if protocol == "https:" { "wss" } else { "ws" };
-    Ok(format!("{ws_protocol}://{host}/ws?room={room_id}"))
+    let pin_query = pin.map(|p| format!("&pin={p}")).unwrap_or_default();
+    Ok(format!("{ws_protocol}://{host}/ws?room={room_id}{pin_query}"))
 }
 
 type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
@@ -235,12 +236,14 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
     track_drag(&canvas, &host.drag);
     let kept = moving.as_ref().map(|m| m.kept);
 
-    let (room_id, share_url) = if let Some(win) = web_sys::window() {
+    let (room_id, share_url, existing_pin) = if let Some(win) = web_sys::window() {
         let loc = win.location();
         let origin = loc.origin().unwrap_or_else(|_| "https://vector.c4ndy.com".to_string());
         let search = loc.search().unwrap_or_default();
         let existing_room =
             search.trim_start_matches('?').split('&').find_map(|p| p.strip_prefix("room=")).filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let existing_pin =
+            search.trim_start_matches('?').split('&').find_map(|p| p.strip_prefix("pin=")).filter(|s| !s.is_empty()).map(|s| s.to_string());
 
         let room_id = match existing_room {
             Some(r) => r,
@@ -252,16 +255,17 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                 generated
             }
         };
-        let share_url = format!("{origin}/?room={room_id}");
-        (room_id, share_url)
+        let pin_suffix = existing_pin.as_ref().map(|p| format!("&pin={p}")).unwrap_or_default();
+        let share_url = format!("{origin}/?room={room_id}{pin_suffix}");
+        (room_id, share_url, existing_pin)
     } else {
-        ("default".to_string(), "https://vector.c4ndy.com".to_string())
+        ("default".to_string(), "https://vector.c4ndy.com".to_string(), None)
     };
 
     // The app until the new runner takes it (still here if starting fails before).
     let slot = Rc::new(RefCell::new(moving.map(|m| m.app)));
     let (runner, taken, page) = (host.runner.clone(), slot.clone(), canvas.clone());
-    let (room_for_closure, share_for_closure) = (room_id.clone(), share_url.clone());
+    let (room_for_closure, share_for_closure, pin_for_closure) = (room_id.clone(), share_url.clone(), existing_pin.clone());
     let result = runner
         .start(
             canvas,
@@ -277,7 +281,7 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                     rs.device.set_device_lost_callback(move |reason, msg| loss.report(&ctx, format!("{reason:?}: {msg}")));
                 }
                 host.pasted.borrow_mut().ctx = Some(ctx.clone());
-                connect_collab(host.collab_inbox.clone(), ctx.clone(), host.ws.clone(), &room_for_closure);
+                connect_collab(host.collab_inbox.clone(), ctx.clone(), host.ws.clone(), &room_for_closure, pin_for_closure.as_deref());
                 let services = services(
                     host.inbox.clone(),
                     host.place_inbox.clone(),
@@ -298,6 +302,10 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                         let _ = app.run("file.new", vectorcraft_ui_egui::serde_json::json!({"width": 800.0, "height": 600.0}));
                         app.collab_room_id = room_for_closure.clone();
                         app.collab_share_url = share_for_closure.clone();
+                        if let Some(ref pin) = pin_for_closure {
+                            app.collab_room_protected = true;
+                            app.collab_password_input = pin.clone();
+                        }
                         app
                     }
                 };
@@ -625,11 +633,11 @@ impl eframe::App for WebShell {
     }
 }
 
-fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws_slot: Rc<RefCell<Option<ws::WebSocket>>>, room_id: &str) {
+fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws_slot: Rc<RefCell<Option<ws::WebSocket>>>, room_id: &str, pin: Option<&str>) {
     if ws_slot.borrow().is_some() {
         return;
     }
-    let url = match resolve_ws_url(room_id) {
+    let url = match resolve_ws_url(room_id, pin) {
         Ok(u) => u,
         Err(e) => {
             log::warn!("collab: couldn't resolve WebSocket URL: {e}");

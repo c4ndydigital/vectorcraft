@@ -363,6 +363,7 @@ pub fn show(app: &mut VectorcraftApp, ctx: &egui::Context) {
     about::show(app, ctx);
     legal::show_impressum(app, ctx);
     legal::show_datenschutz(app, ctx);
+    legal::show_room_password(app, ctx);
     settle(app);
     // The kind of dialog shown last frame: a different one (or none) means this one just opened, and
     // its first field is to take the keyboard focus (`focus_id`, until a field takes it).

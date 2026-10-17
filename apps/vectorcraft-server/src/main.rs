@@ -105,6 +105,7 @@ pub struct RoomState {
     pub last_empty_at: Arc<Mutex<Option<Instant>>>,
     pub blobs: Arc<Mutex<HashMap<String, (String, Bytes)>>>,
     pub mcp_server: Arc<Mutex<vectorcraft_mcp::Server>>,
+    pub pin: Arc<Mutex<Option<String>>>,
 }
 
 impl RoomState {
@@ -130,6 +131,7 @@ impl RoomState {
             last_empty_at: Arc::new(Mutex::new(Some(Instant::now()))),
             blobs: Arc::new(Mutex::new(HashMap::new())),
             mcp_server,
+            pin: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -155,6 +157,8 @@ impl Default for RoomState {
 #[derive(Debug, serde::Deserialize)]
 pub struct WsQuery {
     pub room: Option<String>,
+    pub pin: Option<String>,
+    pub password: Option<String>,
 }
 
 /// Application state shared across Axum routes.
@@ -449,8 +453,7 @@ async fn index_handler(
             room_id,
             mcp::McpQuery {
                 room: query.room,
-                sessionId: None,
-                session_id: None,
+                ..Default::default()
             },
             state,
         )
@@ -464,8 +467,7 @@ async fn index_handler(
             room_id,
             mcp::McpQuery {
                 room: query.room,
-                sessionId: None,
-                session_id: None,
+                ..Default::default()
             },
             state,
         )
@@ -508,6 +510,28 @@ async fn index_handler(
 async fn ws_handler(ws: WebSocketUpgrade, Query(query): Query<WsQuery>, State(state): State<AppState>) -> Result<impl IntoResponse, StatusCode> {
     let room_id = query.room.unwrap_or_else(|| "default".to_string());
     let room = state.get_or_create_room(&room_id)?;
+
+    // Room password / PIN authentication
+    let provided_pin = query.pin.or(query.password);
+    {
+        let room_pin = room.pin.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(expected) = room_pin {
+            match provided_pin {
+                Some(ref p) if p == &expected => {}
+                _ => {
+                    eprintln!("[server] unauthorized ws connection attempt to room '{room_id}' (invalid/missing pin)");
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+            }
+        } else if let Some(initial_pin) = provided_pin {
+            // If room has no password yet, but first connecting client sets it in query:
+            let trimmed = initial_pin.trim().to_string();
+            if !trimmed.is_empty() {
+                *room.pin.lock().unwrap_or_else(|e| e.into_inner()) = Some(trimmed);
+                eprintln!("[server] room '{room_id}' initialized with password protection");
+            }
+        }
+    }
 
     if room.active_clients.load(Ordering::Relaxed) >= state.limits.max_clients_per_room {
         REJECTED_BY_LIMIT_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -659,7 +683,25 @@ async fn handle_socket(socket: WebSocket, room: RoomState, room_id: String, stat
                         if let (Some(key), Some(mime), Some(b64)) =
                             (v.get("key").and_then(|k| k.as_str()), v.get("mime").and_then(|m| m.as_str()), v.get("dataBase64").and_then(|d| d.as_str()))
                         {
-                            if let Some(decoded_bytes) = vectorcraft_format::base64_decode(b64) {
+                            if key == "__room_auth__" {
+                                if let Some(decoded_bytes) = vectorcraft_format::base64_decode(b64) {
+                                    if let Ok(auth_cmd) = serde_json::from_slice::<serde_json::Value>(&decoded_bytes) {
+                                        match auth_cmd.get("type").and_then(|t| t.as_str()) {
+                                            Some("set_room_pin") => {
+                                                if let Some(pin_val) = auth_cmd.get("pin").and_then(|p| p.as_str()) {
+                                                    *room.pin.lock().unwrap_or_else(|e| e.into_inner()) = Some(pin_val.trim().to_string());
+                                                    eprintln!("[server] room '{room_id}' password updated by client {client_id}");
+                                                }
+                                            }
+                                            Some("clear_room_pin") => {
+                                                *room.pin.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                                                eprintln!("[server] room '{room_id}' password cleared by client {client_id}");
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            } else if let Some(decoded_bytes) = vectorcraft_format::base64_decode(b64) {
                                 if room.estimated_bytes() + decoded_bytes.len() <= state.limits.max_room_bytes {
                                     let mut blobs = room.blobs.lock().unwrap_or_else(|e| e.into_inner());
                                     blobs.insert(key.to_string(), (mime.to_string(), Bytes::from(decoded_bytes)));
@@ -889,5 +931,55 @@ mod tests {
         let args = vec!["--version".to_string()];
         let res = parse_cli_args(&args).expect("parse ok");
         assert!(res.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_room_password_auth_flow() {
+        let state = AppState::new(PathBuf::from("/tmp"));
+        let room_id = "test-protected-room";
+        let room = state.get_or_create_room(room_id).expect("room created");
+        
+        // Initially no pin
+        assert!(room.pin.lock().unwrap().is_none());
+
+        // Set pin
+        *room.pin.lock().unwrap() = Some("supersecret123".to_string());
+        assert_eq!(room.pin.lock().unwrap().as_deref(), Some("supersecret123"));
+
+        // Verify MCP auth rejection on missing/wrong pin
+        let query_unauth = mcp::McpQuery {
+            room: Some(room_id.to_string()),
+            sessionId: None,
+            session_id: None,
+            pin: None,
+            password: None,
+        };
+        let resp = mcp::mcp_discovery_impl(HeaderMap::new(), room_id.to_string(), query_unauth, state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let query_wrong = mcp::McpQuery {
+            room: Some(room_id.to_string()),
+            sessionId: None,
+            session_id: None,
+            pin: Some("wrong".to_string()),
+            password: None,
+        };
+        let resp_wrong = mcp::mcp_discovery_impl(HeaderMap::new(), room_id.to_string(), query_wrong, state.clone()).await;
+        assert_eq!(resp_wrong.status(), StatusCode::UNAUTHORIZED);
+
+        // Verify MCP auth success on correct pin
+        let query_ok = mcp::McpQuery {
+            room: Some(room_id.to_string()),
+            sessionId: None,
+            session_id: None,
+            pin: Some("supersecret123".to_string()),
+            password: None,
+        };
+        let resp_ok = mcp::mcp_discovery_impl(HeaderMap::new(), room_id.to_string(), query_ok, state.clone()).await;
+        assert_eq!(resp_ok.status(), StatusCode::OK);
+
+        // Clear pin
+        *room.pin.lock().unwrap() = None;
+        assert!(room.pin.lock().unwrap().is_none());
     }
 }

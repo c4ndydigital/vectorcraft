@@ -160,12 +160,14 @@ impl Backend for RoomBackend {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[allow(non_snake_case)]
 pub struct McpQuery {
     pub room: Option<String>,
     pub sessionId: Option<String>,
     pub session_id: Option<String>,
+    pub pin: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,8 +203,17 @@ pub async fn mcp_discovery_impl(
         return mcp_sse_impl(room_id, query, state).await.into_response();
     }
 
-    if let Err(status) = state.get_or_create_room(&room_id) {
-        return status.into_response();
+    let room = match state.get_or_create_room(&room_id) {
+        Ok(r) => r,
+        Err(status) => return status.into_response(),
+    };
+
+    let provided_pin = query.pin.as_deref().or(query.password.as_deref());
+    let room_pin = room.pin.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(ref expected) = room_pin {
+        if provided_pin != Some(expected.as_str()) {
+            return (StatusCode::UNAUTHORIZED, "Unauthorized: Room is password protected\n").into_response();
+        }
     }
 
     let tools = tool_definitions();
@@ -331,6 +342,14 @@ pub async fn mcp_message_impl(
         Ok(r) => r,
         Err(status) => return status.into_response(),
     };
+
+    let provided_pin = query.pin.as_deref().or(query.password.as_deref());
+    let room_pin = room.pin.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(ref expected) = room_pin {
+        if provided_pin != Some(expected.as_str()) {
+            return (StatusCode::UNAUTHORIZED, "Unauthorized: Room is password protected\n").into_response();
+        }
+    }
 
     let text = match std::str::from_utf8(&body) {
         Ok(t) => t.trim(),

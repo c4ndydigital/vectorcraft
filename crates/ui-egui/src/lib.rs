@@ -463,6 +463,10 @@ pub struct VectorcraftApp {
     pub collab_share_url: String,
     /// Room identifier.
     pub collab_room_id: String,
+    /// Whether the current collaboration room is password/PIN protected.
+    pub collab_room_protected: bool,
+    /// Password / PIN entered by user in the room password modal.
+    pub collab_password_input: String,
     /// The folders control requests, and the input they inject, may read and write
     /// (`--automation-read-root`, `--automation-write-root`); `None`: anywhere. See
     /// [`Self::with_automation_roots`].
@@ -573,6 +577,8 @@ impl VectorcraftApp {
             collab_share_copied_until: 0.0,
             collab_share_url: "/?room=c4ndy-studio".to_string(),
             collab_room_id: "c4ndy-studio".to_string(),
+            collab_room_protected: false,
+            collab_password_input: String::new(),
             automation_roots: None,
             synthetic_frame: false,
         }

@@ -759,3 +759,113 @@ fn test_adversarial_illustrator_editing_sync_battery() {
     assert_eq!(count_a, count_b, "Total document node count must match exactly across peers");
 }
 
+/// 9. EMPIRICAL TEST: Verify Priority Outbox ordering & cursor coalescing against Head-of-Line Blocking.
+/// When large CRDT updates or PDF image blobs are queued, fast cursor presence packets must be
+/// prioritized over them, and stale intermediate cursor positions from the same client must be coalesced.
+#[test]
+fn test_adversarial_outbox_cursor_priority_and_coalescing() {
+    use vectorcraft_ui_egui::{PeerPresence, prioritize_and_coalesce_outbox};
+
+    let mut outbox = vec![
+        // 1. Large binary update queued first
+        CollabOutgoing::Update(vec![0xAA; 100_000]),
+        // 2. Large image blob queued second
+        CollabOutgoing::Blob {
+            key: "img_test_1".to_string(),
+            mime: "image/png".to_string(),
+            bytes: vec![0xBB; 500_000],
+        },
+        // 3. Stale cursor presence from Client 1
+        CollabOutgoing::Presence(PeerPresence {
+            client_id: 1,
+            name: "Alice".to_string(),
+            color: [255, 0, 0, 255],
+            cursor: Some(Point::new(10.0, 10.0)),
+            last_seen: 1.0,
+            active_tab: Some(0),
+            active_interaction: None,
+        }),
+        // 4. Intermediate cursor presence from Client 1
+        CollabOutgoing::Presence(PeerPresence {
+            client_id: 1,
+            name: "Alice".to_string(),
+            color: [255, 0, 0, 255],
+            cursor: Some(Point::new(20.0, 20.0)),
+            last_seen: 1.016,
+            active_tab: Some(0),
+            active_interaction: None,
+        }),
+        // 5. Another update
+        CollabOutgoing::Update(vec![0xCC; 50_000]),
+        // 6. Latest cursor presence from Client 1
+        CollabOutgoing::Presence(PeerPresence {
+            client_id: 1,
+            name: "Alice".to_string(),
+            color: [255, 0, 0, 255],
+            cursor: Some(Point::new(30.0, 30.0)),
+            last_seen: 1.033,
+            active_tab: Some(0),
+            active_interaction: None,
+        }),
+        // 7. Cursor presence from Client 2
+        CollabOutgoing::Presence(PeerPresence {
+            client_id: 2,
+            name: "Bob".to_string(),
+            color: [0, 255, 0, 255],
+            cursor: Some(Point::new(100.0, 200.0)),
+            last_seen: 1.033,
+            active_tab: Some(0),
+            active_interaction: None,
+        }),
+    ];
+
+    let prioritized = prioritize_and_coalesce_outbox(&mut outbox);
+    assert!(outbox.is_empty(), "Original queue must be drained");
+
+    // We expect:
+    // - High priority: PeerPresence from Client 1 (coalesced to point (30.0, 30.0)) and Client 2 (point (100.0, 200.0))
+    // - Normal priority: Updates (2 updates preserved in original relative order)
+    // - Bulk/Low priority: Blob (1 blob at the end)
+    assert_eq!(prioritized.len(), 5, "Stale presences must be coalesced (7 items -> 5 items)");
+
+    match &prioritized[0] {
+        CollabOutgoing::Presence(p) => {
+            assert_eq!(p.client_id, 1);
+            assert_eq!(p.cursor, Some(Point::new(30.0, 30.0)), "Must retain newest position for Client 1");
+            assert_eq!(p.last_seen, 1.033);
+        }
+        other => panic!("Expected Presence at index 0, got {other:?}"),
+    }
+
+    match &prioritized[1] {
+        CollabOutgoing::Presence(p) => {
+            assert_eq!(p.client_id, 2);
+            assert_eq!(p.cursor, Some(Point::new(100.0, 200.0)), "Client 2 presence must be preserved");
+        }
+        other => panic!("Expected Presence at index 1, got {other:?}"),
+    }
+
+    match &prioritized[2] {
+        CollabOutgoing::Update(bytes) => {
+            assert_eq!(bytes.len(), 100_000, "First update preserved in causal order");
+        }
+        other => panic!("Expected Update at index 2, got {other:?}"),
+    }
+
+    match &prioritized[3] {
+        CollabOutgoing::Update(bytes) => {
+            assert_eq!(bytes.len(), 50_000, "Second update preserved in causal order");
+        }
+        other => panic!("Expected Update at index 3, got {other:?}"),
+    }
+
+    match &prioritized[4] {
+        CollabOutgoing::Blob { key, mime, bytes } => {
+            assert_eq!(key, "img_test_1");
+            assert_eq!(mime, "image/png");
+            assert_eq!(bytes.len(), 500_000, "Large blob sent after high priority presence & updates");
+        }
+        other => panic!("Expected Blob at index 4, got {other:?}"),
+    }
+}
+

@@ -45,6 +45,46 @@ pub enum CollabOutgoing {
     Blob { key: String, mime: String, bytes: Vec<u8> },
 }
 
+/// Prioritizes outgoing collaboration packets to eliminate Head-of-Line blocking:
+/// 1. High priority: `PeerPresence` (cursor / interaction stream). Multiple queued presence packets
+///    for the same client are coalesced down to the latest one, discarding intermediate stale frames.
+/// 2. Normal priority: `Update` (CRDT operations). Preserves strict causal order.
+/// 3. Bulk/Low priority: `Blob` (multi-megabyte binary assets / PDF images).
+pub fn prioritize_and_coalesce_outbox(queue: &mut Vec<CollabOutgoing>) -> Vec<CollabOutgoing> {
+    if queue.is_empty() {
+        return Vec::new();
+    }
+    let items = std::mem::take(queue);
+    let mut latest_presences: std::collections::HashMap<u64, PeerPresence> = std::collections::HashMap::new();
+    let mut presence_order: Vec<u64> = Vec::new();
+    let mut updates = Vec::new();
+    let mut blobs = Vec::new();
+
+    for item in items {
+        match item {
+            CollabOutgoing::Presence(p) => {
+                let id = p.client_id;
+                if !latest_presences.contains_key(&id) {
+                    presence_order.push(id);
+                }
+                latest_presences.insert(id, p);
+            }
+            CollabOutgoing::Update(u) => updates.push(CollabOutgoing::Update(u)),
+            CollabOutgoing::Blob { key, mime, bytes } => blobs.push(CollabOutgoing::Blob { key, mime, bytes }),
+        }
+    }
+
+    let mut prioritized = Vec::with_capacity(presence_order.len() + updates.len() + blobs.len());
+    for id in presence_order {
+        if let Some(p) = latest_presences.remove(&id) {
+            prioritized.push(CollabOutgoing::Presence(p));
+        }
+    }
+    prioritized.extend(updates);
+    prioritized.extend(blobs);
+    prioritized
+}
+
 impl VectorcraftApp {
     pub fn collab_peer_name(&self) -> String {
         let trimmed = self.collab_custom_name.trim();

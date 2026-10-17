@@ -35,9 +35,14 @@
    - **Automatisierter Regressionstest**:
      - `crates/ui-egui/tests/collab_adversarial.rs`: `test_adversarial_ephemeral_live_drag_preview` (Verifiziert CRDT-Unterdrückung während Drag, Presence-Bounds Übertragung, remote Ghost-Box und sauberes Clearen auf PointerUp).
 
-2. **Cursor-Latenz & WebSocket Head-of-Line Blocking bei großen Dokumenten / PDFs**:
+2. [x] **Cursor-Latenz & WebSocket Head-of-Line Blocking bei großen Dokumenten / PDFs**:
    - Wenn große PDFs oder viele Shapes importiert werden, belegen Updates oder Blob-Übertragungen die WebSocket-Verbindung.
-   - Entkopplung / Priorisierung: Cursor- und Presence-Nachrichten dürfen nicht hinter großen CRDT-Binärblobs in der Queue feststecken (Priority Outbox / separates Droppen veralteter Cursornachrichten).
+   - **Priorisierung & Coalescing**:
+     - `prioritize_and_coalesce_outbox(&mut queue)` teilt ausgehende Pakete nach Priorität auf: High (`PeerPresence`), Normal (`Update`), Bulk (`Blob`).
+     - Schnelle Cursornachrichten (`PeerPresence`) werden stets vor großen Binärblobs übermittelt.
+     - Veraltete Cursornachrichten desselben Clients werden verworfen (Coalescing), sodass nur die jeweils neueste Cursor-Position übertragen wird.
+   - **Automatisierter Regressionstest**:
+     - `crates/ui-egui/tests/collab_adversarial.rs`: `test_adversarial_outbox_cursor_priority_and_coalescing` (Verifiziert Priorisierung von Presence vor Updates/Blobs sowie Coalescing veralteter Cursor-Frames).
 
 3. [x] **Pathfinder & Compound-Path / Text-Outlines Collab Sync & Disappear Fix**:
    - **Problemstellung**:

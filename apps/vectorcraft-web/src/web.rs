@@ -534,7 +534,7 @@ impl WebShell {
 
         let outgoing: Vec<CollabOutgoing> = {
             let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut *g)
+            vectorcraft_ui_egui::prioritize_and_coalesce_outbox(&mut *g)
         };
 
         for msg in outgoing {

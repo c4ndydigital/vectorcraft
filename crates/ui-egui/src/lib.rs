@@ -167,7 +167,9 @@ pub use serde_json;
 pub use state::{UiState, View};
 pub use sysclip::{ClipboardProbeFactory, SystemClipboard};
 
-pub use collab::{CollabIncoming, CollabOutgoing, PeerInteraction, PeerPresence};
+pub use collab::{
+    CollabIncoming, CollabOutgoing, PeerInteraction, PeerPresence, prioritize_and_coalesce_outbox,
+};
 
 /// What a file dialog shows: a suggested file name (save dialogs), the folder to start in and the
 /// file-type filters.

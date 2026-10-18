@@ -19,8 +19,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/collab-demo.gif" alt="Real-time collaboration: Live peer cursors and autonomous AI agent drawing the c4ndy logo via MCP" width="100%">
-  <br><sub><b>Real-time collaboration in action:</b> Live peer cursors moving across the canvas while an AI agent constructs the c4ndy logo via remote MCP & CRDT sync.</sub>
+  <img src="docs/images/collab-peers.gif" alt="Real-time multi-peer collaboration side-by-side: Alice and Bob co-creating on the same vector canvas" width="100%">
+  <br><sub><b>Multiplayer in action (Side-by-Side):</b> Designer Alice (Client 1) and Bob (Client 2) co-creating shapes, stars, and text simultaneously in real-time.</sub>
 </p>
 
 ---
@@ -50,6 +50,11 @@ This **C4NDY Digital fork** extends VectorCraft into a production-ready, cloud-n
 * **Zero-Config Remote MCP Server:** Integrated directly into `vectorcraft-server`.
 * **Real-time AI Canvas Manipulation:** AI agents (Claude, Gemini, etc.) connect via SSE (`/mcp/sse?room=...`) or HTTP JSON-RPC (`/mcp`) to inspect layers, draw shapes, run batch commands, and collaborate alongside human designers.
 * **Interactive In-App MCP Guide:** One-click room connection instructions directly accessible from the in-app Help menu.
+
+<p align="center">
+  <img src="docs/images/collab-mcp-ai.gif" alt="Autonomous AI Agent interacting via Model Context Protocol (MCP) and drawing on the live canvas" width="100%">
+  <br><sub><b>AI Agent Automation (MCP):</b> Claude / AI Assistant connected via remote MCP stream, autonomously constructing vector badges and shapes onto the live canvas.</sub>
+</p>
 
 ### 3. 🛡️ Privacy-First & DSGVO (GDPR) Compliance
 * **Zero External Font Leaks:** 100% self-hosted, on-demand caching proxy for Google Fonts and Fontsource (`/fonts/...`). Client browsers never leak IP addresses or tracking cookies to external CDNs.

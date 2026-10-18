@@ -20,9 +20,14 @@ pub(super) fn show(app: &mut VectorcraftApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             // Tabs: About · Contributors · Models · KI & MCP (the credits are compiled in, see `credits`).
             let tab_id = egui::Id::new("about_tab");
-            let mut tab = ui.data_mut(|d| d.get_temp::<u8>(tab_id)).unwrap_or(0);
+            let mut tab = if let Some(t) = app.ui.about_tab.take() {
+                t
+            } else {
+                ui.data_mut(|d| d.get_temp::<u8>(tab_id)).unwrap_or(0)
+            };
             ui.horizontal(|ui| {
-                for (i, label) in [tl!("About"), tl!("Contributors"), tl!("Models"), tl!("KI & MCP Connect")].into_iter().enumerate() {
+                let tabs = [tl!("About"), tl!("Contributors"), tl!("Models"), "KI & MCP Connect"];
+                for (i, label) in tabs.into_iter().enumerate() {
                     let i = i as u8;
                     if ui.selectable_label(tab == i, label).clicked() {
                         tab = i;

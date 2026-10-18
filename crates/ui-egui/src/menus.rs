@@ -364,6 +364,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, &str)] = &[
         "{} opens the Save PDF dialog; with params = document.exportPdf options written to path (asked when missing; viewAfterSaving opens the file) → {path, bytes, warnings}",
     ),
     ("help.about", "About VectorCraft", "", "{}"),
+    ("help.mcp", "Live KI & MCP Verbindung…", "", "{}"),
     ("help.commandPalette", "Search Commands…", "Cmd+Shift+/", "{}"),
     ("app.quit", "Quit VectorCraft", "Cmd+Q", "{}"),
     (
@@ -1253,6 +1254,11 @@ pub fn run_ui_command(app: &mut VectorcraftApp, id: &str, p: &Value) -> Option<R
         "file.export.pdf" if p.as_object().is_none_or(|o| o.is_empty()) => crate::dialogs::open_save_pdf(app, &json!({})),
         "file.export.pdf" => io::export_pdf(app, p.clone()),
         "help.about" => {
+            app.ui.about = true;
+            Ok(Value::Null)
+        }
+        "help.mcp" => {
+            app.ui.about_tab = Some(3);
             app.ui.about = true;
             Ok(Value::Null)
         }
@@ -2668,6 +2674,8 @@ pub fn menu_tree_named(english_names: bool) -> Vec<(&'static str, Vec<Item>)> {
                 c("Search Commands…", "help.commandPalette"),
                 todos("VectorCraft Help…", "F1"),
                 Sep,
+                c("Live KI & MCP Verbindung…", "help.mcp"),
+                Sep,
                 c("Impressum", "help.impressum"),
                 c("Datenschutz", "help.datenschutz"),
                 Sep,
@@ -3227,6 +3235,11 @@ pub fn invoke(app: &mut VectorcraftApp, id: &str, p: Value) {
     }
     if id == "help.datenschutz" {
         app.ui.datenschutz = true;
+        return;
+    }
+    if id == "help.mcp" {
+        app.ui.about_tab = Some(3);
+        app.ui.about = true;
         return;
     }
     if matches!(id, "help.discord" | "help.website" | "help.appPage" | "help.github") {

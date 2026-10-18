@@ -317,6 +317,7 @@ pub struct UiState {
     /// Draw Normal / Behind / Inside.
     pub draw_mode: u8,
     pub about: bool,
+    pub about_tab: Option<u8>,
     pub impressum: bool,
     pub datenschutz: bool,
     pub room_password: bool,
@@ -632,6 +633,7 @@ impl Default for UiState {
             screen_mode: 0,
             draw_mode: 0,
             about: false,
+            about_tab: None,
             impressum: false,
             datenschutz: false,
             room_password: false,

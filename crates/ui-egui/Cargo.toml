@@ -33,14 +33,20 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `now_ms` (src/lib.rs) reads the page's `performance.now()` with this crate in the web build. It is
+# MIT OR Apache-2.0 and already in the build through eframe.
+web-time = "1"
+web-sys = { version = "0.3", features = ["Window", "Document"] }
+
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }
 vectorcraft-testkit = { workspace = true }
+# A variable font built in code (no font file is committed).
+vectorcraft-text = { workspace = true, features = ["test-fonts"] }
 wat = { workspace = true }
 
 [build-dependencies]
 serde_json = { workspace = true }
 toml = "1"
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-web-sys = { version = "0.3", features = ["Window", "Document"] }

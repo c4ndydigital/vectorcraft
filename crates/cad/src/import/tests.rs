@@ -652,6 +652,27 @@ fn inserts_become_symbol_instances_with_their_transform() {
 }
 
 #[test]
+fn an_insert_is_measured_clicked_and_marqueed_by_its_blocks_art() {
+    let inserts = [(0, "INSERT"), (8, "Doors"), (2, "Door"), (10, "100"), (20, "50"), (41, "2"), (42, "3"), (50, "90")];
+    let doc = open(&with_door(DOOR_LINE, &inserts), &points()).document;
+    let [inst] = &leaves(&doc)[..] else { panic!() };
+    let h = height(&doc);
+    // The line, 20 units up from the insertion point: a box with no width at x 100. The 20 × 20
+    // square placed by the insert's transform would be a 60 × 40 box from x 70 to 130.
+    let b = doc.bounds_of(&[inst.id], false).unwrap();
+    assert!(close(b, Rect::new(100.0, h - 70.0, 100.0, h - 50.0), 1e-9), "{b:?}");
+    // A click 25 pt right of the line, inside that square's box, selects nothing; one on the line
+    // selects the insert.
+    let hit = |x: f64| vectorcraft_doc::hit::hit_test(&doc, Point::new(x, h - 60.0), vectorcraft_doc::hit::HitOptions::default()).map(|h| h.leaf);
+    assert_eq!(hit(125.0), None);
+    assert_eq!(hit(100.0), Some(inst.id));
+    // A marquee beside the line leaves it out; one across it takes it.
+    let marquee = |r: Rect| vectorcraft_doc::hit::marquee(&doc, r, None, false);
+    assert!(marquee(Rect::new(115.0, h - 65.0, 125.0, h - 55.0)).is_empty());
+    assert_eq!(marquee(Rect::new(90.0, h - 62.0, 110.0, h - 58.0)), vec![inst.id]);
+}
+
+#[test]
 fn by_block_colours_make_a_symbol_per_look() {
     // The block's line takes the insert's colour: red and green make two symbols; a third red
     // insert reuses the first.
@@ -940,6 +961,41 @@ fn drawings_the_export_writes_read_back() {
             assert!(art.iter().any(|n| n.appearance.fill().is_some_and(|f| !f.paint.is_none())), "{version:?}: the fill comes back as a hatch");
             let w = stroked.appearance.stroke().unwrap().width;
             assert!((w - 2.0).abs() < 0.2, "{version:?}: lineweight {w}");
+        }
+    }
+}
+
+#[test]
+fn closed_control_point_splines_stay_closed_through_export_and_import() {
+    // (explicitly closed, ends where it starts): coincident endpoints alone do not close a path.
+    let cases = [(true, true), (true, false), (false, true), (false, false)];
+    let mut doc = Document::new(200.0, 100.0);
+    let layer = doc.layers[0].id;
+    for (i, &(closed, returns)) in cases.iter().enumerate() {
+        let mut b = kurbo::BezPath::new();
+        b.move_to((20.0, 20.0));
+        b.curve_to((80.0, 0.0), (80.0, 80.0), (20.0, 80.0));
+        if returns {
+            b.curve_to((0.0, 80.0), (0.0, 20.0), (20.0, 20.0));
+        }
+        if closed {
+            b.close_path();
+        }
+        let id = doc.alloc_id();
+        let black = Appearance::basic(Paint::None, Paint::solid(Color::rgb8(0, 0, 0)), 1.0);
+        doc.insert(Some(layer), i, Node::path(id, vectorcraft_geom::PathData::from_bezpath(&b), black)).unwrap();
+    }
+    for version in crate::DxfVersion::ALL.into_iter().filter(|v| *v >= crate::DxfVersion::R13) {
+        let opts = crate::DxfOptions { version, unit: Unit::Points, region: doc.artboards[0].rect, ..crate::DxfOptions::default() };
+        let out = crate::export(&doc, &opts).unwrap();
+        let text = std::str::from_utf8(&out.bytes).unwrap();
+        assert_eq!(text.matches("\nSPLINE\n").count(), cases.len(), "{version:?}: curves are written as SPLINE entities");
+        let back = leaves(&open(&out.bytes, &points()).document);
+        assert_eq!(back.len(), cases.len(), "{version:?}");
+        for (n, &(closed, returns)) in back.iter().zip(&cases) {
+            let path = n.path_data().unwrap();
+            assert_eq!(path.subpaths.len(), 1, "{version:?}");
+            assert_eq!(path.subpaths[0].closed, closed, "{version:?}: closed {closed}, returns {returns}");
         }
     }
 }

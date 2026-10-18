@@ -377,7 +377,7 @@ pub(super) fn section_list(ui: &mut egui::Ui, d: &mut Dialog, sections: &[&str],
     for s in sections {
         let sel = *s == section;
         let label = egui::RichText::new(tl!(*s)).size(12.5).color(if sel { t.text_strong } else { t.text });
-        if ui.add(egui::Button::selectable(sel, label).frame_when_inactive(false).min_size(egui::vec2(LIST_WIDTH - 12.0, 24.0))).clicked() {
+        if ui.add(egui::Button::selectable(sel, label).min_size(egui::vec2(LIST_WIDTH - 12.0, 24.0))).clicked() {
             d.fields.insert("__section".into(), json!(s));
         }
     }
@@ -938,6 +938,26 @@ mod tests {
         let r = app.run("file.export.pdf", json!({"path": "/tmp/direct.pdf", "range": "2"})).unwrap();
         assert_eq!(r["path"], "/tmp/direct.pdf");
         assert!(r["warnings"].is_array());
+    }
+
+    /// A placed image whose pixel data can't be decoded is left out of the PDF, and the status bar
+    /// shows the note raster exports give.
+    #[test]
+    fn an_image_that_couldnt_be_decoded_is_named_in_the_status() {
+        let (mut app, written, _) = app();
+        // A PNG whose header reads (so it places at its size) but whose pixel data is cut short.
+        let mut cut = vec![];
+        image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 30, 30, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut cut), image::ImageFormat::Png)
+            .unwrap();
+        let idat = cut.windows(4).position(|w| w == b"IDAT").unwrap();
+        cut.truncate(idat + 8);
+        // The image is placed on the first artboard.
+        app.run("file.place", json!({"name": "cut.png", "dataBase64": vectorcraft_format::base64_encode(&cut), "at": [60, 50]})).unwrap();
+        app.run("ui.savePdfDialog", json!({"path": "/tmp/cut.pdf"})).unwrap();
+        super::super::confirm(&mut app).unwrap();
+        assert_eq!(app.ui.status, "Saved /tmp/cut.pdf with 1 note(s): an image couldn't be decoded and is missing from the picture");
+        assert_eq!(written.borrow().len(), 1);
     }
 
     #[test]

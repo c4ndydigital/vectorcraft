@@ -2,11 +2,11 @@
 
 use serde_json::{Value, json};
 use vectorcraft_color::BlendMode;
-use vectorcraft_doc::{ArrowAlign, Document, LineCap, LineJoin, Node, NodeKind, StrokeAlign, StrokeLayer, WidthProfile};
+use vectorcraft_doc::{ArrowAlign, Document, LineCap, LineJoin, Node, NodeKind, StrokeAlign, StrokeLayer, SymbolBoxes, WidthProfile};
 
 use crate::Session;
 
-fn rect_json(r: Option<vectorcraft_geom::Rect>) -> Value {
+pub(crate) fn rect_json(r: Option<vectorcraft_geom::Rect>) -> Value {
     match r {
         Some(r) => json!({ "x": r.x0, "y": r.y0, "width": r.width(), "height": r.height() }),
         None => Value::Null,
@@ -26,20 +26,21 @@ pub struct SummaryOpts {
     pub compound_member: bool,
 }
 
-/// Compact tree summary of a node (for `document.inspect`): the whole subtree.
-pub fn node_summary(n: &Node) -> Value {
-    node_summary_opts(n, SummaryOpts::default())
+/// Compact tree summary of a node (for `document.inspect`): the whole subtree, symbol instances
+/// measured by their art from `symbols`.
+pub fn node_summary(n: &Node, symbols: &SymbolBoxes) -> Value {
+    node_summary_opts(n, SummaryOpts::default(), symbols)
 }
 
 /// The same summary with [`SummaryOpts`] applied.
-pub fn node_summary_opts(n: &Node, opts: SummaryOpts) -> Value {
+pub fn node_summary_opts(n: &Node, opts: SummaryOpts, symbols: &SymbolBoxes) -> Value {
     let mut v = json!({
         "id": n.id.0,
         "name": n.display_name(),
         "kind": n.kind_label(),
         "visible": n.visible,
         "locked": n.locked,
-        "bounds": rect_json(n.geometric_bounds()),
+        "bounds": rect_json(n.geometric_bounds_with(symbols)),
     });
     if n.opacity < 1.0 {
         v["opacity"] = json!(n.opacity);
@@ -114,7 +115,7 @@ pub fn node_summary_opts(n: &Node, opts: SummaryOpts) -> Value {
                 child_limit: opts.child_limit,
                 compound_member: matches!(n.kind, NodeKind::Compound { .. }),
             };
-            v["children"] = Value::Array(ch.iter().rev().take(take_n).map(|c| node_summary_opts(c, next)).collect());
+            v["children"] = Value::Array(ch.iter().rev().take(take_n).map(|c| node_summary_opts(c, next, symbols)).collect());
         }
         if take_n < total || v.get("children").is_none() {
             v["childCount"] = json!(total);
@@ -130,6 +131,111 @@ pub fn document(s: &Session) -> Value {
 /// The same summary with [`SummaryOpts`] applied to the layer tree (artboards and
 /// the rest always come whole): `depth: 0` is the skeleton — top layers with counts.
 pub fn document_opts(s: &Session, opts: SummaryOpts) -> Value {
+    document_scoped(s, opts, &Scope::default())
+}
+
+/// Which nodes `document.inspect` lists in place of the whole layer tree.
+#[derive(Clone, Debug, Default)]
+pub struct Scope {
+    /// Only these nodes (any level, already checked to exist), in the order given.
+    pub ids: Option<Vec<vectorcraft_doc::NodeId>>,
+    /// Only nodes of this panel label (case-insensitive), searched in the subtrees of `ids`
+    /// or else of every layer.
+    pub kind: Option<String>,
+    /// At most this many entries after `offset` (`None`: all).
+    pub limit: Option<u64>,
+    /// Entries skipped first.
+    pub offset: u64,
+}
+
+impl Scope {
+    fn scoped(&self) -> bool {
+        self.ids.is_some() || self.kind.is_some()
+    }
+}
+
+/// A node with the ids of its ancestors (layer first).
+type Hit<'a> = (&'a Node, Vec<u64>);
+
+fn ancestors(d: &Document, id: vectorcraft_doc::NodeId) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut cur = d.parent_of(id);
+    // The bound keeps a malformed tree from looping.
+    while let Some(p) = cur.filter(|_| out.len() < 10_000) {
+        out.push(p.0);
+        cur = d.parent_of(p);
+    }
+    out.reverse();
+    out
+}
+
+fn collect_kind<'a>(n: &'a Node, kind: &str, path: &mut Vec<u64>, out: &mut Vec<Hit<'a>>) {
+    if n.kind_label().eq_ignore_ascii_case(kind) {
+        out.push((n, path.clone()));
+    }
+    if let Some(ch) = n.children() {
+        path.push(n.id.0);
+        for c in ch.iter().rev() {
+            collect_kind(c, kind, path, out);
+        }
+        path.pop();
+    }
+}
+
+/// [`document_opts`] with the layer tree replaced by the nodes `scope` picks. Without `ids`
+/// or `kind` they are the top layers (`layers`, paged by `limit`/`offset`); with either they
+/// are `nodes` (each with its `path` of ancestor ids when picked by `kind`). A paged or scoped
+/// reply also reports `total`, the entries before paging.
+pub fn document_scoped(s: &Session, opts: SummaryOpts, scope: &Scope) -> Value {
+    let Some(st) = s.active() else { return Value::Null };
+    let d = &st.doc;
+    let symbols = d.symbol_boxes();
+    let mut hits: Vec<Hit> = Vec::new();
+    match (&scope.ids, scope.kind.as_deref().filter(|k| !k.is_empty())) {
+        (None, None) => hits.extend(d.layers.iter().rev().map(|l| (&**l, Vec::new()))),
+        (Some(ids), None) => hits.extend(ids.iter().filter_map(|&i| d.node(i)).map(|n| (n, Vec::new()))),
+        (ids, Some(kind)) => {
+            let mut path = Vec::new();
+            match ids {
+                Some(ids) => {
+                    for n in ids.iter().filter_map(|&i| d.node(i)) {
+                        path = ancestors(d, n.id);
+                        collect_kind(n, kind, &mut path, &mut hits);
+                    }
+                }
+                None => d.layers.iter().rev().for_each(|l| collect_kind(l, kind, &mut path, &mut hits)),
+            }
+        }
+    }
+    let total = hits.len();
+    let skip = usize::try_from(scope.offset).unwrap_or(usize::MAX);
+    let take = scope.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
+    let by_kind = scope.kind.as_deref().is_some_and(|k| !k.is_empty());
+    let nodes: Vec<Value> = hits
+        .into_iter()
+        .skip(skip)
+        .take(take)
+        .map(|(n, path)| {
+            let member = d.parent_of(n.id).and_then(|p| d.node(p)).is_some_and(|p| matches!(p.kind, NodeKind::Compound { .. }));
+            let mut v = node_summary_opts(n, SummaryOpts { compound_member: member, ..opts }, &symbols);
+            if by_kind {
+                v["path"] = json!(path);
+            }
+            v
+        })
+        .collect();
+    let mut out = document_base(s);
+    if let Some(o) = out.as_object_mut() {
+        o.insert(if scope.scoped() { "nodes" } else { "layers" }.into(), Value::Array(nodes));
+        if scope.scoped() || scope.limit.is_some() || scope.offset > 0 {
+            o.insert("total".into(), json!(total));
+        }
+    }
+    out
+}
+
+/// Everything `document.inspect` reports except the layer tree.
+fn document_base(s: &Session) -> Value {
     let Some(st) = s.active() else { return Value::Null };
     let d = &st.doc;
     json!({
@@ -140,8 +246,6 @@ pub fn document_opts(s: &Session, opts: SummaryOpts) -> Value {
         "units": d.units.label(),
         "colorMode": format!("{:?}", d.color_mode),
         "artboards": d.artboards.iter().map(|a| json!({"name": a.name, "x": a.rect.x0, "y": a.rect.y0, "width": a.rect.width(), "height": a.rect.height()})).collect::<Vec<_>>(),
-        // Top of the stack first, like the Layers panel.
-        "layers": d.layers.iter().rev().map(|l| node_summary_opts(l, opts)).collect::<Vec<_>>(),
         "currentLayer": st.active_layer.map(|l| l.0),
         // The rows highlighted in the Layers panel (`layer.setCurrent`, `layer.highlight`).
         "layerRows": st.highlighted_rows().iter().map(|i| i.0).collect::<Vec<_>>(),

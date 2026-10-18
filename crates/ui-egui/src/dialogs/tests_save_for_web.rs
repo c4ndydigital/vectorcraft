@@ -24,7 +24,10 @@ fn app(dir: &std::path::Path, web: bool) -> (VectorcraftApp, Log) {
         ..Default::default()
     };
     if web {
-        services.download = Some(Box::new(move |name: &str, b: &[u8]| l2.borrow_mut().push(format!("download {name} {}", b.len()))));
+        services.download = Some(Box::new(move |name: &str, b: &[u8]| {
+            l2.borrow_mut().push(format!("download {name} {}", b.len()));
+            Ok(())
+        }));
     }
     let mut app = VectorcraftApp::new(Session::new(), services);
     app.run("file.new", json!({"width": 60, "height": 40})).unwrap();
@@ -136,6 +139,38 @@ fn preview_in_browser_opens_the_page() {
     assert!(std::fs::read_to_string(&page).unwrap().contains("images/Untitled-1.jpg"));
     let log = log.borrow();
     assert!(log.last().unwrap().starts_with("open file://") && log.last().unwrap().ends_with("Untitled-1.html"), "{log:?}");
+}
+
+#[test]
+fn saving_says_in_the_status_bar_when_an_image_could_not_be_decoded() {
+    const NOTE: &str = "with 1 note(s): an image couldn't be decoded and is missing from the picture";
+    // A PNG whose header reads but whose pixel data is cut short: the renderer draws nothing for it.
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 30, 30, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let idat = png.windows(4).position(|w| w == b"IDAT").unwrap();
+    png.truncate(idat + 8);
+    let place = |app: &mut VectorcraftApp| {
+        app.run("file.place", json!({"name": "cut.png", "dataBase64": vectorcraft_format::base64_encode(&png), "at": [30, 20]})).unwrap()
+    };
+    let dir = vectorcraft_testkit::temp_dir("sfw-undecoded");
+    let (mut desktop, _) = app(&dir, false);
+    desktop.run("file.saveForWeb", json!({"format": "png24"})).unwrap();
+    assert!(!desktop.ui.status.contains("note"), "{}", desktop.ui.status);
+    place(&mut desktop);
+    for p in [json!({"format": "png24"}), json!({"format": "jpg", "output": "html"})] {
+        desktop.status("");
+        desktop.run("file.saveForWeb", p.clone()).unwrap();
+        assert!(desktop.ui.status.starts_with("Saved ") && desktop.ui.status.ends_with(NOTE), "{p}: {}", desktop.ui.status);
+    }
+    desktop.status("");
+    desktop.run("file.saveForWeb.browser", json!({"format": "gif"})).unwrap();
+    assert!(desktop.ui.status.ends_with(NOTE), "Preview in Browser: {}", desktop.ui.status);
+    let (mut web, _) = app(&dir, true);
+    place(&mut web);
+    web.run("file.saveForWeb", json!({"format": "png8"})).unwrap();
+    assert!(web.ui.status.ends_with(NOTE), "download: {}", web.ui.status);
 }
 
 #[test]

@@ -7,7 +7,7 @@ use vectorcraft_color::Paint;
 use vectorcraft_doc::{Node, NodeKind, Scaling};
 use vectorcraft_geom::{Affine, Point, Rect, Vec2};
 
-use super::edit::selected_roots;
+use super::edit::{outermost, selected_roots};
 use super::*;
 use crate::EngineError;
 
@@ -27,7 +27,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Sample Color",
             [],
             None,
-            "{color, stroke?: bool (default: whichever proxy is active), ids?, stop?: index} sample a colour into the active fill/stroke (and the selection); with `stop`, recolour that stop of the gradient behind the proxy instead (paint.editGradient)",
+            "{color, stroke?: bool (default: whichever proxy is active), ids?, stop?: index} sample a colour into the active fill/stroke (and the selection); with `stop`, recolour that stop of the gradient behind the proxy instead (paint.editGradient); in a CMYK document an RGB color is stored as CMYK through the color settings, as paint.setFill stores it",
             has_doc,
             sample_color
         ),
@@ -140,7 +140,8 @@ fn distort(s: &mut Session, p: &Value) -> Result<Value> {
         .filter(|a| a.len() == 4)
         .and_then(|a| a.iter().map(|c| finite_numbers(c).map(|[x, y]| Point::new(x, y))).collect());
     let Some(&[tl, tr, br, bl]) = corners.as_deref() else { return Err(bad(C, "corners must be 4 [x, y] points (TL, TR, BR, BL)")) };
-    let ids = if p.get("ids").is_some_and(|v| !v.is_null()) { checked_ids_param(s, p, "ids", C)? } else { selected_roots(s)? };
+    let ids =
+        if p.get("ids").is_some_and(|v| !v.is_null()) { outermost(&s.doc()?.doc, checked_ids_param(s, p, "ids", C)?) } else { selected_roots(s)? };
     if ids.is_empty() {
         return Err(bad(C, "nothing to distort"));
     }
@@ -345,7 +346,7 @@ fn sample_color(s: &mut Session, p: &Value) -> Result<Value> {
         None | Some(Value::Null) => (if stroke { "paint.setStroke" } else { "paint.setFill" }, json!({ "color": c })),
         Some(v) => {
             let i = v.as_u64().ok_or_else(|| bad(C, "`stop` must be a stop index"))? as usize;
-            let color = color_value(c).ok_or_else(|| bad(C, format!("bad color {c}")))?;
+            let color = super::paint::new_color(s, p, color_value(c).ok_or_else(|| bad(C, format!("bad color {c}")))?);
             let (fill, stroke_paint) = s.proxy_paints();
             let Paint::Gradient(g) = (if stroke { stroke_paint } else { fill }) else {
                 return Err(bad(C, "the paint behind the proxy is not a gradient"));

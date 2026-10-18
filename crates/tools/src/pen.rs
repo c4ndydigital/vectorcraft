@@ -17,6 +17,9 @@
 //! segment of a selected path adds an anchor there and a click on one of its anchors deletes it
 //! (Shift held or General → Disable Auto Add/Delete starts a new path instead). On a selected
 //! blend's spine a click adds a point (on a point no key object sits on: deletes it).
+//! The pointer shows the new-path asterisk where a click starts a new path. While a path is being
+//! drawn it shows no badge, except where a click closes the path, joins another open path or
+//! converts an anchor.
 //! Each anchor placed snaps to Smart Guides ([`DrawSnap`]): onto the anchors, centres and paths of
 //! the other art and of the path being drawn, into line with them, onto the construction guides
 //! through the last anchor; with Shift held it slides along its 45° step into line. Hovering shows
@@ -44,6 +47,11 @@ pub struct PenTool {
     in_h: Point,
     /// The pointer at the last button-down or drag: Space held moves the anchor as far as it moves.
     last: Point,
+    /// Where the button went down: the drag threshold is measured from it.
+    pressed: Point,
+    /// The pointer has moved past the drag threshold since the press: a press released inside it
+    /// is a click, so the anchor stays a corner without handles.
+    dragged: bool,
     /// The last anchor of the path being drawn, while a click retracts its outgoing handle or a
     /// drag pulls a new one out: (path, subpath, anchor, its position).
     handle: Option<(NodeId, usize, usize, Point)>,
@@ -52,6 +60,9 @@ pub struct PenTool {
     /// Smart Guides for the anchors placed (and the pointer hovering).
     snap: DrawSnap,
 }
+
+/// Screen pixels the pointer must move after a press before it shapes handles instead of clicking.
+const DRAG_THRESHOLD: f64 = 3.0;
 
 /// An anchor being placed, as the press decided: where it is, the path it goes on (none: the
 /// first anchor of a new path) and whether it closes that path (the press was on its first
@@ -141,6 +152,17 @@ fn alt_converts(cx: &ToolContext, p: Point, m: Mods) -> bool {
             || crate::draw2::segment_in(cx, crate::draw2::shown_paths(cx), p, cx.pick_tol()).is_some())
 }
 
+/// The cursor where [`alt_converts`]: Alt lends the Anchor Point tool, so its caret over a handle
+/// end or an anchor, the Reshape Segment cursor over a segment.
+fn alt_cursor(cx: &ToolContext, p: Point) -> Cursor {
+    let point = cx.point_tol();
+    if hit_handle(cx, p, point).is_some() || crate::draw2::anchor_in(cx, crate::draw2::shown_paths(cx), p, point).is_some() {
+        Cursor::AnchorPoint
+    } else {
+        Cursor::ReshapeSegment
+    }
+}
+
 /// Preview the outgoing handle of anchor `ai` of subpath `si` at `h`, the incoming one left alone.
 fn set_out_handle(id: NodeId, si: usize, ai: usize, h: Point) -> Action {
     Action::Preview(
@@ -181,6 +203,8 @@ impl Tool for PenTool {
             }
             PointerKind::Down => {
                 self.last = ev.pos;
+                self.pressed = ev.pos;
+                self.dragged = false;
                 if let Some((id, first, last, _)) = active {
                     let end = last_anchor(cx, id);
                     let closing_end = end.filter(|(_, ai)| *ai > 0).map(|_| first);
@@ -264,6 +288,16 @@ impl Tool for PenTool {
             PointerKind::Drag => {
                 if let Some(t) = &mut self.convert {
                     return t.pointer(cx, ev);
+                }
+                // Illustrator treats a press as a drag only past a few screen pixels. `last` follows the
+                // pointer meanwhile, so Space pressed before the threshold moves the anchor by the
+                // next move only.
+                if !self.dragged {
+                    if ev.pos.distance(self.pressed) < cx.tol(DRAG_THRESHOLD) {
+                        self.last = ev.pos;
+                        return vec![];
+                    }
+                    self.dragged = true;
                 }
                 if let Some((id, si, ai, a)) = self.handle {
                     let mut h = ev.pos;
@@ -367,8 +401,13 @@ impl Tool for PenTool {
         o
     }
     fn cursor(&self, cx: &ToolContext, p: Point, m: Mods) -> Cursor {
+        // An Alt gesture under way keeps the Anchor Point tool's cursor.
+        if let Some(t) = &self.convert {
+            return t.cursor(cx, p, m);
+        }
         let tol = cx.tol(5.0).max(cx.point_tol());
-        if let Some((id, first, last, _)) = self.active(cx) {
+        let active = self.active(cx);
+        if let Some((id, first, last, _)) = active {
             let closing_end = last_anchor(cx, id).filter(|(_, ai)| *ai > 0).map(|_| first);
             match pick_endpoint(closing_end, last, p, tol, Endpoint::First) {
                 Some(Endpoint::First) => return Cursor::PenClose,
@@ -380,9 +419,11 @@ impl Tool for PenTool {
             }
         }
         if alt_converts(cx, p, m) {
-            return Cursor::PenConvert;
+            return alt_cursor(cx, p);
         }
-        if !self.drawing {
+        // These show whenever no path is being drawn, also after another path was selected while
+        // the Pen was drawing.
+        if active.is_none() {
             match spine_click(cx, p, tol).as_deref() {
                 Some([Action::Exec(c, _)]) if c == "object.blend.spine.removeAnchor" => return Cursor::PenDelete,
                 Some([_]) => return Cursor::PenAdd,
@@ -399,7 +440,8 @@ impl Tool for PenTool {
                 None => {}
             }
         }
-        Cursor::Pen
+        // The new-path asterisk shows only while a click starts a new path.
+        if active.is_some() { Cursor::PenDrawing } else { Cursor::Pen }
     }
 }
 
@@ -465,6 +507,20 @@ mod tests {
     use super::*;
     use crate::testutil::*;
     use vectorcraft_doc::Selection;
+
+    #[test]
+    fn press_inside_drag_threshold_places_a_corner() {
+        let (d, s) = (vectorcraft_doc::Document::new(500.0, 500.0), Selection::default());
+        let paint = paint();
+        let cx =
+            ToolContext { zoom: 1.0, smart_guides: false, snap_to_point: false, snap_to_pixel: false, snap_to_grid: false, ..cx(&d, &s, &paint) };
+        let mut pen = PenTool::default();
+        pen.pointer(&cx, &PointerEvent::new(PointerKind::Down, 100.0, 100.0));
+        assert!(pen.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 101.0, 101.0)).is_empty());
+        assert_eq!(pen.pointer(&cx, &PointerEvent::new(PointerKind::Up, 101.0, 101.0)), vec![Action::Commit]);
+        pen.pointer(&cx, &PointerEvent::new(PointerKind::Down, 200.0, 200.0));
+        assert_eq!(pen.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 204.0, 200.0)).len(), 1);
+    }
 
     #[test]
     fn snapped_last_endpoint_converts_active_path_after_raw_miss() {
@@ -675,6 +731,25 @@ mod tests {
         t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 300.0, 440.0).with_mods(alt));
         let drag = PointerEvent::new(PointerKind::Drag, 340.0, 440.0).with_mods(alt);
         assert_eq!(handles(t.pointer(&cx, &drag)), (json!([300.0, 440.0]), json!([340.0, 440.0])));
+    }
+
+    #[test]
+    fn space_pressed_inside_the_drag_threshold_moves_the_anchor_by_the_next_move_only() {
+        let (d, s) = (vectorcraft_doc::Document::new(500.0, 500.0), Selection::default());
+        let paint = paint();
+        let cx =
+            ToolContext { zoom: 1.0, smart_guides: false, snap_to_point: false, snap_to_pixel: false, snap_to_grid: false, ..cx(&d, &s, &paint) };
+        let space = Mods { space: true, ..Mods::default() };
+        let mut pen = PenTool::default();
+        pen.pointer(&cx, &PointerEvent::new(PointerKind::Down, 100.0, 100.0));
+        // Still inside the threshold, Space held: nothing happens yet.
+        assert!(pen.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 102.0, 100.0).with_mods(space)).is_empty());
+        // The move that crosses it moves the anchor by that move (2 px to 4 px), not by the 4 px since the press.
+        let acts = pen.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 104.0, 100.0).with_mods(space));
+        let Some(Action::Preview(c, v)) = acts.first() else { panic!("not a preview: {acts:?}") };
+        assert_eq!(c, "path.create");
+        assert_eq!(v["anchors"][0]["x"], json!(102.0), "moved by the delta");
+        assert_eq!(v["anchors"][0]["y"], json!(100.0));
     }
 
     #[test]
@@ -924,7 +999,7 @@ mod tests {
                 click(&mut narrow_pen, &narrow, near.x, near.y, Mods::default()),
                 vec![Action::Begin("Convert Anchor Point".into()), set_out(id, 1, 60.0, 300.0)]
             );
-            assert_eq!(narrow_pen.cursor(&narrow, Point::new(60.0, 300.0 + 6.0 / zoom), Mods::default()), Cursor::Pen);
+            assert_eq!(narrow_pen.cursor(&narrow, Point::new(60.0, 300.0 + 6.0 / zoom), Mods::default()), Cursor::PenDrawing);
         }
     }
 
@@ -1152,8 +1227,9 @@ mod tests {
         let alt = Mods { alt: true, ..Mods::default() };
         let t = PenTool::default();
         let cx0 = cx(&d, &s, &p);
-        assert_eq!(t.cursor(&cx0, Point::new(250.0, 101.0), alt), Cursor::PenConvert);
-        assert_eq!(t.cursor(&cx0, Point::new(200.0, 101.0), alt), Cursor::PenConvert);
+        // Alt lends the Anchor Point tool, and its caret with it.
+        assert_eq!(t.cursor(&cx0, Point::new(250.0, 101.0), alt), Cursor::AnchorPoint);
+        assert_eq!(t.cursor(&cx0, Point::new(200.0, 101.0), alt), Cursor::AnchorPoint);
         assert_eq!(t.cursor(&cx0, Point::new(250.0, 101.0), Mods::default()), Cursor::Pen);
         assert_eq!(t.cursor(&cx0, Point::new(150.0, 300.0), alt), Cursor::Pen);
         // A drag of the handle moves it alone, as one gesture.
@@ -1189,16 +1265,23 @@ mod tests {
         let cx = cx(&d, &s, &p);
         let alt = Mods { alt: true, ..Mods::default() };
         let mut t = PenTool { drawing: true, ..PenTool::default() };
-        assert_eq!(t.cursor(&cx, Point::new(150.0, 302.0), alt), Cursor::PenConvert);
-        assert_eq!(t.cursor(&cx, Point::new(150.0, 302.0), Mods::default()), Cursor::Pen);
+        assert_eq!(t.cursor(&cx, Point::new(150.0, 302.0), alt), Cursor::ReshapeSegment);
+        assert_eq!(t.cursor(&cx, Point::new(150.0, 302.0), Mods::default()), Cursor::PenDrawing);
         assert_eq!(t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 150.0, 302.0).with_mods(alt)), vec![]);
         let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 150.0, 262.0).with_mods(alt));
+        assert_eq!(t.cursor(&cx, Point::new(150.0, 262.0), alt), Cursor::ReshapeSegment, "kept during the reshape");
         assert_eq!(a[0], Action::Begin("Reshape".into()));
         assert!(
-            matches!(&a[1], Action::Preview(c, v) if c == "path.reshapeSegment" && v["id"] == id.0 && v["segment"] == 0 && v["dy"] == -40.0),
+            matches!(&a[1], Action::Preview(c, v) if c == "path.reshapeSegment" && v["id"] == id.0 && v["segment"] == 0 && v["dy"] == -40.0 && v["perpendicular"] == false),
             "{a:?}"
         );
         assert_eq!(t.pointer(&cx, &PointerEvent::new(PointerKind::Up, 150.0, 262.0)), vec![Action::Commit]);
+        // Shift held too keeps the handles at right angles to the line between the anchors.
+        let alt_shift = Mods { shift: true, ..alt };
+        t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 150.0, 302.0).with_mods(alt));
+        let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 160.0, 262.0).with_mods(alt_shift));
+        assert!(matches!(&a[1], Action::Preview(c, v) if c == "path.reshapeSegment" && v["perpendicular"] == true), "{a:?}");
+        assert_eq!(t.pointer(&cx, &PointerEvent::new(PointerKind::Up, 160.0, 262.0)), vec![Action::Commit]);
         let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 250.0, 400.0).with_mods(alt));
         assert!(matches!(&a[..], [Action::Begin(_), Action::Preview(c, _)] if c == "path.appendAnchor"), "{a:?}");
     }
@@ -1225,7 +1308,30 @@ mod tests {
         sb.set([b]);
         let cx_b = cx(&d, &sb, &p);
         assert_eq!(t.cursor(&cx_b, Point::new(150.0, 350.0), Mods::default()), Cursor::Pen);
+        // An end of B shows what a click there does: it goes on drawing B.
+        assert_eq!(t.cursor(&cx_b, Point::new(60.0, 400.0), Mods::default()), Cursor::PenContinue);
         let acts = click(&mut t, &cx_b, 150.0, 350.0, Mods::default());
         assert!(matches!(&acts[..], [Action::Begin(_), Action::Preview(c, _)] if c == "path.create"), "{acts:?}");
+    }
+
+    /// The new-path asterisk shows until a path is started; while one is being drawn the pen has no
+    /// badge, and the asterisk comes back once the path is finished.
+    #[test]
+    fn the_new_path_asterisk_shows_only_before_a_path_is_started() {
+        let (d, _, s) = drawing(vectorcraft_geom::SubPath::polyline(&[Point::new(10.0, 300.0)], false));
+        let p = paint();
+        let cx = cx(&d, &s, &p);
+        let empty = Point::new(250.0, 450.0);
+        let mut t = PenTool::default();
+        assert_eq!(t.cursor(&cx, empty, Mods::default()), Cursor::Pen, "no path started");
+        t.drawing = true;
+        assert_eq!(t.cursor(&cx, empty, Mods::default()), Cursor::PenDrawing, "after the first anchor");
+        let a = click(&mut t, &cx, empty.x, empty.y, Mods::default());
+        assert!(matches!(&a[..], [Action::Begin(_), Action::Preview(c, _)] if c == "path.appendAnchor"), "{a:?}");
+        assert_eq!(t.cursor(&cx, empty, Mods::default()), Cursor::PenDrawing);
+        assert_eq!(t.cursor(&cx, empty, Mods { shift: true, ..Mods::default() }), Cursor::PenDrawing, "Shift constrains the next anchor");
+        t.key(&cx, ToolKey::Enter, Mods::default());
+        assert_eq!(t.cursor(&cx, empty, Mods::default()), Cursor::Pen, "the path is finished");
+        assert_eq!(Cursor::PenDrawing.precise(), Cursor::Crosshair);
     }
 }

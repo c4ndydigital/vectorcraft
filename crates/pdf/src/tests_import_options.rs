@@ -2,7 +2,7 @@
 
 use vectorcraft_doc::{Document, NodeKind};
 use vectorcraft_geom::Rect;
-use vectorcraft_testkit::pdf::{PdfPage, pdf};
+use vectorcraft_testkit::pdf::{PdfPage, first_extra, pdf, pdf_with};
 
 use crate::*;
 
@@ -158,6 +158,27 @@ fn art_of_neighbouring_artboards_off_a_page_is_left_to_its_own_page() {
     assert_eq!(d.layers[0].children().map_or(0, |c| c.len()), 2);
 }
 
+/// A `.ai` keeps its art past the artboard edge (#646): a note mostly left of artboard 2 (as notes
+/// for a design are put beside it) doesn't lie over artboard 1 in the row, where it would be taken
+/// for that page's art: page 2 moves right until its art clears page 1's.
+#[test]
+fn art_of_an_ai_page_reaching_left_does_not_lie_over_the_page_before() {
+    let ai = "/PieceInfo << /Illustrator << /Private << /AIPrivateData1 7 /NumBlock 1 >> >> >>";
+    let page = |content: &str| PdfPage { entries: ai.into(), ..PdfPage::new(100.0, 100.0, content) };
+    // Page 2's note runs from 70 points left of its box to 10 points into it.
+    let pages = [page("0 g 10 10 20 20 re f"), page("1 1 1 rg 1 0 0 RG -70 10 80 60 re B")];
+    let d = open(&pdf(&pages, None), ImportOptions::default());
+    let (a, b) = (d.artboards[0].rect, d.artboards[1].rect);
+    let note = d.layers[1].children().unwrap()[0].visual_bounds().unwrap();
+    assert!(note.x0 >= a.x1 + 36.0, "the note clears artboard 1: {note:?} {a:?}");
+    assert!((b.x0 - note.x0 - 70.0).abs() < 1.0, "and keeps its place by artboard 2: {note:?} {b:?}");
+    assert_eq!((b.width(), b.height()), (100.0, 100.0));
+    // A plain PDF clips its art to the page: its pages stay 36 points apart.
+    let plain = [PdfPage::new(100.0, 100.0, "0 g 10 10 20 20 re f"), PdfPage::new(100.0, 100.0, "1 0 0 RG -70 10 80 60 re S")];
+    let d = open(&pdf(&plain, None), ImportOptions::default());
+    assert_eq!(d.artboards[1].rect.x0, d.artboards[0].rect.x1 + 36.0);
+}
+
 #[test]
 fn an_encrypted_pdf_opens_with_its_password_only() {
     let bytes = pdf(&[PdfPage::new(200.0, 100.0, "1 0 0 rg 10 10 50 50 re f")], Some("secret"));
@@ -187,6 +208,42 @@ fn info_lists_pages_with_their_size_rotation_and_boxes() {
     assert!(p.boxes.iter().all(|(k, _)| *k != CropTo::Bounding));
     assert_eq!((i.pages[1].width, i.pages[1].height, i.pages[1].rotation), (50.0, 100.0, 270));
     assert!(matches!(info(b"not a pdf", None), Err(PdfError::Parse(_))));
+}
+
+/// The edges of `r`, for [`near`].
+fn edges(r: Rect) -> [f64; 4] {
+    [r.x0, r.y0, r.x1, r.y1]
+}
+
+/// `info` gives a page's boxes in points, as its size: a page whose `UserUnit` is 10 has them at
+/// ten times the file's numbers, as the artboard and bleed that Crop To trim makes of them.
+/// Whatever the page's `UserUnit` entry, its media box has the size `info` gives.
+#[test]
+fn info_gives_the_boxes_of_a_user_unit_page_in_points() {
+    // A 5 × 7 inch trim box with an eighth of an inch of bleed round it (0.9 units of 10 points).
+    let page = |entries: &str| PdfPage {
+        trim: Some([0.9, 0.9, 36.9, 51.3]),
+        bleed: Some([0.0, 0.0, 37.8, 52.2]),
+        entries: entries.into(),
+        ..PdfPage::new(37.8, 52.2, "0 g 2 2 10 8 re f")
+    };
+    // The `UserUnit` given directly, and as an indirect object.
+    for bytes in [pdf(&[page("/UserUnit 10")], None), pdf_with(&[page(&format!("/UserUnit {} 0 R", first_extra(1)))], &["10"], None)] {
+        let p = &info(&bytes, None).unwrap().pages[0];
+        assert!((p.width - 378.0).abs() < 1e-3 && (p.height - 522.0).abs() < 1e-3, "{p:?}");
+        let b = |c: CropTo| p.boxes.iter().find(|(k, _)| *k == c).map(|(_, r)| edges(*r)).unwrap();
+        assert!(near(b(CropTo::Media), [0.0, 0.0, 378.0, 522.0]) && near(b(CropTo::Trim), [9.0, 9.0, 369.0, 513.0]), "{p:?}");
+        let d = open(&bytes, ImportOptions { crop: CropTo::Trim, ..Default::default() });
+        assert!(near(edges(d.artboards[0].rect), [0.0, 0.0, 360.0, 504.0]), "{:?}", d.artboards[0].rect);
+        assert!(near(d.setup.bleed, [9.0; 4]), "{:?}", d.setup.bleed);
+    }
+    for unit in
+        ["", "/UserUnit 1", "/UserUnit 2.5", "/UserUnit 0.5", "/UserUnit 0", "/UserUnit -10", "/UserUnit /Ten", "/UserUnit (10)", "/UserUnit 1000000"]
+    {
+        let p = &info(&pdf(&[page(unit)], None), None).unwrap().pages[0];
+        let media = p.boxes.iter().find(|(k, _)| *k == CropTo::Media).map(|(_, r)| *r).unwrap();
+        assert!((media.width() / p.width - 1.0).abs() < 1e-6 && (media.height() / p.height - 1.0).abs() < 1e-6, "{unit}: {p:?}");
+    }
 }
 
 #[test]

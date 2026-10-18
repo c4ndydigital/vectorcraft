@@ -152,6 +152,39 @@ fn shape_builder_regions_query() {
     assert!(regs.iter().any(|x| x["sources"].as_array().unwrap().len() == 2));
 }
 
+/// #1691: four circles in a 2×2 grid, each touching its neighbours, enclose a diamond nothing
+/// fills. It is a region, and a drag from a circle into it merges the two.
+#[test]
+fn shape_builder_merges_the_gap_touching_circles_enclose() {
+    let mut s = session();
+    let mut circles = vec![];
+    for (x, y) in [(0.0, 0.0), (100.0, 0.0), (0.0, 100.0), (100.0, 100.0)] {
+        let r = s.execute("shape.ellipse", &json!({"x": x, "y": y, "width": 100, "height": 100})).unwrap();
+        circles.push(NodeId(r["id"].as_u64().unwrap()));
+    }
+    set_fill(&mut s, circles[0], Color::rgb(1.0, 0.0, 0.0));
+    s.execute("select.set", &json!({"ids": circles.iter().map(|i| i.0).collect::<Vec<_>>()})).unwrap();
+    let r = s.execute("shapeBuilder.regions", &json!({})).unwrap();
+    let regs = r["regions"].as_array().unwrap();
+    assert_eq!(regs.len(), 5, "{regs:?}");
+    assert_eq!(regs.iter().filter(|x| x["sources"].as_array().unwrap().is_empty()).count(), 1, "the diamond");
+    let r = s.execute("shapeBuilder.merge", &json!({"points": [[50, 50], [100, 100]]})).unwrap();
+    assert_eq!(r["regions"], 2);
+    let out = ids(&r);
+    assert_eq!(out.len(), 4, "the merged shape and the three other circles");
+    let merged = NodeId(r["merged"].as_u64().unwrap());
+    // A circle (its Bézier outline: 7,854.9) and the diamond between the four (2,145.1).
+    assert!((area(&s, merged) - 10000.0).abs() < 10.0, "{}", area(&s, merged));
+    assert_eq!(node(&s, merged).appearance.fill_paint(), Paint::solid(Color::rgb(1.0, 0.0, 0.0)), "the look of the circle the drag began on");
+    assert_eq!(layer_children(&s), 4);
+    // A click in the diamond alone makes it a shape of its own.
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("select.set", &json!({"ids": circles.iter().map(|i| i.0).collect::<Vec<_>>()})).unwrap();
+    let r = s.execute("shapeBuilder.merge", &json!({"points": [[100, 100]]})).unwrap();
+    assert_eq!(ids(&r).len(), 5);
+    assert!((area(&s, NodeId(r["merged"].as_u64().unwrap())) - 2146.0).abs() < 10.0);
+}
+
 #[test]
 fn shape_builder_tool_drives_the_command() {
     let mut s = session();
@@ -544,6 +577,232 @@ fn live_paint_merge_keeps_paint_and_adds_faces() {
     assert_eq!(layer_children(&s), 1);
 }
 
+/// A Live Paint group of one open path round the square 0..100, its end 2 pt short of its start.
+fn live_square_with_a_gap(s: &mut Session) -> NodeId {
+    let anchors = [(0, 0), (100, 0), (100, 100), (0, 100), (0, 2)].map(|(x, y)| json!({"x": x, "y": y}));
+    let p = s.execute("path.create", &json!({ "anchors": anchors })).unwrap();
+    s.execute("select.set", &json!({"ids": [p["id"]]})).unwrap();
+    live_group_only(s)
+}
+
+fn gap_options(s: &Session, g: NodeId) -> vectorcraft_doc::GapOptions {
+    node(s, g).gap_options()
+}
+
+/// The gaps of a `livePaint.*` reply, rounded to 1e-6.
+fn gaps_of(r: &Value) -> Vec<Vec<f64>> {
+    r["gaps"].as_array().unwrap().iter().map(|g| g.as_array().unwrap().iter().map(|v| (v.as_f64().unwrap() * 1e6).round() / 1e6).collect()).collect()
+}
+
+#[test]
+fn live_paint_gap_detection_stops_paint_at_a_gap() {
+    let mut s = session();
+    let g = live_square_with_a_gap(&mut s);
+    // Paint leaks through the gap: there is no face to fill.
+    assert!(vectorcraft_tools::builder::faces(&node(&s, g)).is_empty());
+    assert!(s.execute("livePaint.fill", &json!({"group": g.0, "point": [50, 50]})).is_err());
+    let info = s.execute("livePaint.info", &json!({"group": g.0})).unwrap();
+    assert_eq!(info["gapOptions"], json!({"detect": false, "size": "small", "points": 3.0, "color": "#ff4f4f"}));
+    assert_eq!(gaps_of(&info), [[0.0, 0.0, 0.0, 2.0]], "Small Gaps (3 pt) finds the gap");
+    // Gap Detection with Small Gaps: the square is one face, filled in one undo step.
+    let depth = s.doc().unwrap().history.undo.len();
+    let r = s.execute("livePaint.gapOptions", &json!({"detect": true, "size": "small"})).unwrap();
+    assert_eq!(s.doc().unwrap().history.undo.len(), depth + 1);
+    assert_eq!((ids(&r), &r["faces"], &r["closed"]), (vec![g], &json!(1), &json!(0)));
+    assert_eq!(gaps_of(&r), [[0.0, 0.0, 0.0, 2.0]]);
+    let f = s.execute("livePaint.fill", &json!({"group": g.0, "point": [50, 50], "color": "#00ff00"})).unwrap();
+    let face = node(&s, NodeId(f["face"].as_u64().unwrap()));
+    assert!((vectorcraft_pathops::area(face.path_data().unwrap(), FillRule::NonZero).abs() - 10000.0).abs() < 1e-6);
+    assert_eq!(vectorcraft_tools::builder::edges(&node(&s, g)).len(), 1, "the gap is no edge");
+    // A color change keeps the face and its paint.
+    s.execute("livePaint.gapOptions", &json!({"id": g.0, "color": "Green"})).unwrap();
+    let opts = gap_options(&s, g);
+    assert_eq!((opts.detect, opts.size, opts.color), (true, vectorcraft_doc::GapSize::Small, [0x4f, 0xff, 0x4f]));
+    let gn = node(&s, g);
+    let kept = vectorcraft_tools::builder::face_at(&gn, vectorcraft_geom::Point::new(50.0, 50.0)).unwrap();
+    assert_eq!(kept.appearance.fill_paint(), Paint::solid(Color::from_hex("#00ff00").unwrap()));
+    // A custom size narrower than the gap lets paint leak again, and so does Gap Detection off.
+    let r = s.execute("livePaint.gapOptions", &json!({"size": 1.5})).unwrap();
+    assert_eq!((&r["faces"], gaps_of(&r).len()), (&json!(0), 0));
+    s.execute("livePaint.gapOptions", &json!({"size": 12})).unwrap();
+    assert_eq!(vectorcraft_tools::builder::faces(&node(&s, g)).len(), 1);
+    let r = s.execute("livePaint.gapOptions", &json!({"detect": false})).unwrap();
+    assert_eq!((&r["faces"], gaps_of(&r).len()), (&json!(0), 1));
+    // Bad values change nothing.
+    for bad in [json!({"size": 0}), json!({"size": 73}), json!({"size": "huge"}), json!({"detect": "yes"}), json!({"color": "#12"})] {
+        assert!(s.execute("livePaint.gapOptions", &bad).is_err(), "{bad}");
+    }
+    assert_eq!(gap_options(&s, g).size, vectorcraft_doc::GapSize::Custom(12.0));
+    // Plain paths are no Live Paint group.
+    let r = rect(&mut s, 200.0, 0.0, 10.0, 10.0);
+    assert!(s.execute("livePaint.gapOptions", &json!({"id": r.0, "detect": true})).is_err());
+    // Expand leaves a plain group, without the options.
+    s.execute("livePaint.expand", &json!({"id": g.0})).unwrap();
+    assert!(node(&s, g).extras().live_paint_gaps.is_none());
+}
+
+#[test]
+fn medium_and_large_gaps_stop_paint_at_wider_gaps() {
+    // Squares whose ends stop 5 pt and 9 pt short of their starts: each size closes the gaps up
+    // to its width (Small 3 pt, Medium 6 pt, Large 12 pt).
+    for (gap, closed_by) in [(5, ["medium", "large"]), (9, ["large", "large"])] {
+        let mut s = session();
+        let anchors = [(0, 0), (100, 0), (100, 100), (0, 100), (0, gap)].map(|(x, y)| json!({"x": x, "y": y}));
+        let p = s.execute("path.create", &json!({ "anchors": anchors })).unwrap();
+        s.execute("select.set", &json!({"ids": [p["id"]]})).unwrap();
+        let g = live_group_only(&mut s);
+        for size in ["small", "medium", "large"] {
+            let r = s.execute("livePaint.gapOptions", &json!({"detect": true, "size": size})).unwrap();
+            let faces = if closed_by.contains(&size) { 1 } else { 0 };
+            assert_eq!(r["faces"], json!(faces), "a {gap} pt gap with {size}");
+        }
+        let info = s.execute("livePaint.info", &json!({"group": g.0})).unwrap();
+        assert_eq!(info["gapOptions"], json!({"detect": true, "size": "large", "points": 12.0, "color": "#ff4f4f"}));
+        s.execute("livePaint.gapOptions", &json!({"size": "Medium"})).unwrap();
+        assert_eq!(gap_options(&s, g).size, vectorcraft_doc::GapSize::Medium);
+    }
+}
+
+#[test]
+fn gap_options_keep_the_paint_of_split_faces_and_of_unpainted_faces() {
+    let mut s = session();
+    // A red square with a divider that stops 2 pt short of its top edge.
+    let r = rect(&mut s, 0.0, 0.0, 100.0, 100.0);
+    set_fill(&mut s, r, Color::rgb(1.0, 0.0, 0.0));
+    let l = line(&mut s, (50.0, 2.0), (50.0, 100.0));
+    s.execute("select.set", &json!({"ids": [r.0, l.0]})).unwrap();
+    let g = live_group_only(&mut s);
+    assert_eq!(vectorcraft_tools::builder::faces(&node(&s, g)).len(), 1);
+    s.execute("livePaint.fill", &json!({"group": g.0, "point": [25, 50], "color": "#00ff00"})).unwrap();
+    let fill_at = |s: &Session, x: f64| {
+        let gn = node(s, g);
+        vectorcraft_tools::builder::face_at(&gn, vectorcraft_geom::Point::new(x, 50.0)).map(|f| f.appearance.fill_paint())
+    };
+    let green = Paint::solid(Color::from_hex("#00ff00").unwrap());
+    // Closing the gap splits the face in two, and both halves keep its paint.
+    let r = s.execute("livePaint.gapOptions", &json!({"detect": true})).unwrap();
+    assert_eq!(r["faces"], 2, "{r}");
+    assert_eq!((fill_at(&s, 25.0), fill_at(&s, 75.0)), (Some(green.clone()), Some(green.clone())));
+    // A face painted with none stays unpainted when the options change, and a face keeps its
+    // transparency and the rest of its look when the faces are made again.
+    s.execute("livePaint.fill", &json!({"group": g.0, "point": [75, 50], "none": true})).unwrap();
+    s.execute("livePaint.gapOptions", &json!({"color": "Blue"})).unwrap();
+    assert_eq!((fill_at(&s, 25.0), fill_at(&s, 75.0)), (Some(green.clone()), Some(Paint::None)));
+    let left = vectorcraft_tools::builder::face_at(&node(&s, g), vectorcraft_geom::Point::new(25.0, 50.0)).unwrap().id;
+    s.edit("t", |d, _| {
+        d.node_mut(left).unwrap().opacity = 0.5;
+        Ok(())
+    })
+    .unwrap();
+    s.execute("livePaint.gapOptions", &json!({"size": 12})).unwrap();
+    let gn = node(&s, g);
+    let f = vectorcraft_tools::builder::face_at(&gn, vectorcraft_geom::Point::new(25.0, 50.0)).unwrap();
+    assert_eq!((f.opacity, f.appearance.fill_paint()), (0.5, green));
+    assert_eq!(fill_at(&s, 75.0), Some(Paint::None));
+}
+
+#[test]
+fn a_gradient_face_split_by_a_closed_gap_keeps_one_gradient_across_both_halves() {
+    use vectorcraft_color::{Gradient, GradientKind, GradientPaint, GradientStop};
+    let mut s = session();
+    let r = rect(&mut s, 0.0, 0.0, 100.0, 100.0);
+    let stops = vec![GradientStop::new(0.0, Color::rgb(1.0, 0.0, 0.0)), GradientStop::new(1.0, Color::rgb(0.0, 0.0, 1.0))];
+    let gradient = Paint::Gradient(Box::new(GradientPaint::new(Gradient { kind: GradientKind::Linear, stops })));
+    s.edit("t", |d, _| {
+        d.node_mut(r).unwrap().appearance.set_fill(gradient);
+        Ok(())
+    })
+    .unwrap();
+    let l = line(&mut s, (50.0, 2.0), (50.0, 100.0));
+    s.execute("select.set", &json!({"ids": [r.0, l.0]})).unwrap();
+    let g = live_group_only(&mut s);
+    s.execute("livePaint.gapOptions", &json!({"detect": true})).unwrap();
+    let gn = node(&s, g);
+    let geoms: Vec<_> = vectorcraft_tools::builder::faces(&gn)
+        .iter()
+        .map(|f| match f.appearance.fill_paint() {
+            Paint::Gradient(gp) => gp.geom,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(geoms.len(), 2);
+    assert!(geoms[0].is_some() && geoms[0] == geoms[1], "both halves keep the square's fit: {geoms:?}");
+}
+
+#[test]
+fn close_gaps_with_paths_adds_an_unpainted_path_across_each_gap() {
+    let mut s = session();
+    let g = live_square_with_a_gap(&mut s);
+    let r = s.execute("livePaint.gapOptions", &json!({"closeGaps": true})).unwrap();
+    assert_eq!((&r["faces"], &r["closed"], gaps_of(&r).len()), (&json!(1), &json!(1), 0), "{r}");
+    assert!(!gap_options(&s, g).detect, "Gap Detection stays off: the path closes the gap");
+    let gn = node(&s, g);
+    let src = vectorcraft_tools::builder::sources(&gn).unwrap();
+    let added = src.children().unwrap().last().unwrap();
+    assert!(added.appearance.fill_paint().is_none() && added.appearance.stroke_paint().is_none(), "unpainted");
+    let bb = added.geometric_bounds().unwrap();
+    assert!(bb.x0.abs() < 1e-9 && bb.x1.abs() < 1e-9 && bb.y0.abs() < 1e-9 && (bb.y1 - 2.0).abs() < 1e-9, "{bb:?}");
+    assert!(s.execute("livePaint.fill", &json!({"group": g.0, "point": [50, 50]})).is_ok());
+    // Release gives the closing path back with the others.
+    assert_eq!(ids(&s.execute("livePaint.release", &json!({"id": g.0})).unwrap()).len(), 2);
+}
+
+#[test]
+fn gap_options_survive_save_copy_and_undo() {
+    let mut s = session();
+    let g = live_square_with_a_gap(&mut s);
+    s.execute("livePaint.gapOptions", &json!({"detect": true, "size": 4.5, "color": "#123456"})).unwrap();
+    let want = vectorcraft_doc::GapOptions { detect: true, size: vectorcraft_doc::GapSize::Custom(4.5), color: [0x12, 0x34, 0x56] };
+    assert_eq!(gap_options(&s, g), want);
+    let doc = s.doc().unwrap().doc.clone();
+    let back = vectorcraft_format::load(&vectorcraft_format::save(&doc, false)).unwrap();
+    assert_eq!(back.node(g).unwrap().gap_options(), want);
+    s.execute("edit.copy", &json!({})).unwrap();
+    s.execute("edit.paste", &json!({})).unwrap();
+    let pasted = s.doc().unwrap().selection.objects[0];
+    assert_ne!(pasted, g);
+    assert_eq!(gap_options(&s, pasted), want);
+    assert_eq!(vectorcraft_tools::builder::faces(&node(&s, pasted)).len(), 1);
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(gap_options(&s, g), vectorcraft_doc::GapOptions::default());
+    assert!(vectorcraft_tools::builder::faces(&node(&s, g)).is_empty());
+}
+
+#[test]
+fn merged_live_paint_groups_keep_the_bottom_groups_gap_options() {
+    use vectorcraft_doc::{GapOptions, GapSize};
+    // Two groups side by side, the left one at the bottom, merged with each Gap Detection setting.
+    let merged = |bottom: Value, top: Value| {
+        let mut s = session();
+        let groups: Vec<NodeId> = [0.0, 200.0]
+            .into_iter()
+            .zip([bottom, top])
+            .map(|(x, opts)| {
+                let r = rect(&mut s, x, 0.0, 100.0, 100.0);
+                s.execute("select.set", &json!({"ids": [r.0]})).unwrap();
+                let g = live_group_only(&mut s);
+                s.execute("livePaint.gapOptions", &opts).unwrap();
+                g
+            })
+            .collect();
+        s.execute("select.set", &json!({"ids": [groups[0].0, groups[1].0]})).unwrap();
+        let r = s.execute("livePaint.merge", &json!({})).unwrap();
+        assert_eq!(NodeId(r["id"].as_u64().unwrap()), groups[0]);
+        gap_options(&s, groups[0])
+    };
+    let six = json!({"detect": true, "size": 6, "color": "Blue"});
+    let twelve = json!({"detect": true, "size": 12});
+    let off = json!({"detect": false, "size": 12, "color": "Blue"});
+    let blue = [0x4f, 0x4f, 0xff];
+    // The bottom group's options, with its Gap Detection on.
+    assert_eq!(merged(six.clone(), twelve), GapOptions { detect: true, size: GapSize::Custom(6.0), color: blue });
+    // Detection on with Small Gaps when only a group above has it on.
+    assert_eq!(merged(off.clone(), six), GapOptions { detect: true, size: GapSize::Small, color: blue });
+    // With detection off in every group, the bottom group's options.
+    assert_eq!(merged(off, json!({"detect": false})), GapOptions { detect: false, size: GapSize::Custom(12.0), color: blue });
+}
+
 #[test]
 fn live_paint_bucket_tool_fills_face() {
     let mut s = session();
@@ -650,6 +909,34 @@ fn traced_paths(n: &Node) -> Vec<Arc<Node>> {
 }
 
 #[test]
+fn a_large_image_traces_with_a_warning() {
+    // The public documentation: images over 1500 px on a side are traced, only more slowly.
+    let mut s = session();
+    let art = vectorcraft_trace::Raster::from_fn(
+        1600,
+        40,
+        |x, y| if (100..1500).contains(&x) && (10..30).contains(&y) { [0, 0, 0, 255] } else { [255; 4] },
+    );
+    add_image(&mut s, &art, Affine::IDENTITY);
+    let r = s.execute("imageTrace.make", &json!({"params": {"ignoreWhite": true}})).unwrap();
+    assert_eq!(r["paths"], 1);
+    let w = r["warnings"].as_array().unwrap();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].as_str().unwrap().contains("1600 × 40") && w[0].as_str().unwrap().contains("1500"), "{w:?}");
+    // Make and Expand says so too.
+    let r = s.execute("imageTrace.makeAndExpand", &json!({"id": r["id"], "params": {"ignoreWhite": true}})).unwrap();
+    assert_eq!(r["warnings"].as_array().map(Vec::len), Some(1));
+    // At 1500 px and under, no warning.
+    let mut s = session();
+    image_doc(&mut s);
+    let r = s.execute("imageTrace.make", &json!({})).unwrap();
+    assert_eq!(r["warnings"], json!([]));
+    let edge = vectorcraft_trace::Raster::from_fn(1500, 8, |x, _| if x < 700 { [0, 0, 0, 255] } else { [255; 4] });
+    add_image(&mut s, &edge, Affine::IDENTITY);
+    assert_eq!(s.execute("imageTrace.make", &json!({})).unwrap()["warnings"], json!([]));
+}
+
+#[test]
 fn image_trace_make_places_paths_over_the_image() {
     let mut s = session();
     let img = image_doc(&mut s);
@@ -669,6 +956,143 @@ fn image_trace_make_places_paths_over_the_image() {
     let bb = p.bounds().unwrap();
     assert!((bb.center().x - 150.0).abs() < 1.5 && (bb.center().y - 150.0).abs() < 1.5, "{bb:?}");
     assert_eq!(paths[0].appearance.fill_paint(), Paint::solid(Color::rgb8(0, 0, 0)));
+}
+
+/// Shapes: the disc of the test image comes out as a live ellipse where the image lies, the same
+/// circle as its traced path; without the option it is a plain path.
+#[test]
+fn image_trace_shapes_makes_live_shapes() {
+    let mut s = session();
+    image_doc(&mut s);
+    let r = s.execute("imageTrace.make", &json!({"params": {"ignoreWhite": true, "shapes": true}})).unwrap();
+    let n = node(&s, NodeId(r["id"].as_u64().unwrap()));
+    let paths = traced_paths(&n);
+    assert_eq!(paths.len(), 1);
+    let NodeKind::Path { path, live: Some(live), .. } = &paths[0].kind else { panic!("not a live shape: {:?}", paths[0].kind) };
+    let vectorcraft_doc::LiveShape::Ellipse { w, h, .. } = **live else { panic!("{live:?}") };
+    // A circle of r = 30 px, drawn twice the size.
+    assert!(w == h && (w - 60.0).abs() < 0.75, "{w} × {h}");
+    let bb = path.bounds().unwrap();
+    assert!((bb.center().x - 150.0).abs() < 1.5 && (bb.center().y - 150.0).abs() < 1.5 && (bb.width() - 120.0).abs() < 1.5, "{bb:?}");
+    assert_eq!(*path, live.to_path());
+    assert_eq!(paths[0].appearance.fill_paint(), Paint::solid(Color::rgb8(0, 0, 0)));
+    // Off, as documents saved before have it: a path.
+    let mut s = session();
+    image_doc(&mut s);
+    let r = s.execute("imageTrace.make", &json!({"params": {"ignoreWhite": true}})).unwrap();
+    let n = node(&s, NodeId(r["id"].as_u64().unwrap()));
+    assert!(matches!(traced_paths(&n)[0].kind, NodeKind::Path { live: None, .. }));
+}
+
+/// Auto Grouping: a ring and the dot in its hole are a group (the ring first), the square beside
+/// them is not in it; the picture is the same as without, and the group traces again, expands
+/// and releases as any other.
+#[test]
+fn image_trace_auto_grouping_groups_what_is_inside() {
+    let art = vectorcraft_trace::Raster::from_fn(120, 80, |x, y| {
+        let d = (x as f64 + 0.5 - 40.0).hypot(y as f64 + 0.5 - 40.0);
+        if d <= 6.0 || (90..110).contains(&x) && (30..50).contains(&y) {
+            [200, 0, 0, 255]
+        } else if (16.0..=30.0).contains(&d) {
+            [0, 0, 160, 255]
+        } else {
+            [255, 255, 255, 255]
+        }
+    });
+    let make = |grouping: bool| {
+        let mut s = session();
+        add_image(&mut s, &art, Affine::IDENTITY);
+        let r = s.execute("imageTrace.make", &json!({"preset": "6 Colors", "params": {"ignoreWhite": true, "autoGrouping": grouping}})).unwrap();
+        assert_eq!(r["paths"], 3);
+        let g = NodeId(r["id"].as_u64().unwrap());
+        (s, g)
+    };
+    let (mut s, g) = make(true);
+    let items = traced_paths(&node(&s, g));
+    assert_eq!(items.len(), 2);
+    let group = items.iter().find(|n| matches!(n.kind, NodeKind::Group { .. })).expect("a group");
+    let inside = group.children().unwrap();
+    assert_eq!(inside.len(), 2);
+    assert_eq!(inside[0].appearance.fill_paint(), Paint::solid(Color::rgb8(0, 0, 160)));
+    assert_eq!(inside[1].appearance.fill_paint(), Paint::solid(Color::rgb8(200, 0, 0)));
+    assert!(matches!(items.iter().find(|n| n.id != group.id).unwrap().kind, NodeKind::Path { .. }));
+    // The same picture as without.
+    let (flat, fg) = make(false);
+    assert_eq!(traced_paths(&node(&flat, fg)).len(), 3);
+    let shot = |s: &Session| {
+        let img = render_doc(s, true);
+        (0..120).flat_map(|x| (0..80).map(move |y| (x, y))).map(|(x, y)| img.pixel(x, y)).collect::<Vec<_>>()
+    };
+    assert_eq!(shot(&s), shot(&flat));
+    // In black and white too, where the white inside the ring is a path traced before the ring:
+    // it stays under the ring in their group (over it, the ring's inner edge would show a seam).
+    let bw = |grouping: bool| {
+        let mut s = session();
+        add_image(&mut s, &art, Affine::IDENTITY);
+        let r = s.execute("imageTrace.make", &json!({"params": {"autoGrouping": grouping}})).unwrap();
+        let groups = traced_paths(&node(&s, NodeId(r["id"].as_u64().unwrap()))).iter().filter(|n| matches!(n.kind, NodeKind::Group { .. })).count();
+        (s, groups)
+    };
+    let (grouped, flat) = (bw(true), bw(false));
+    assert!(grouped.1 > 0 && flat.1 == 0);
+    assert_eq!(shot(&grouped.0), shot(&flat.0));
+    // Traced again without the option, it is flat again; expanded, the groups stay.
+    let r = s.execute("imageTrace.make", &json!({"preset": "6 Colors", "params": {"ignoreWhite": true}})).unwrap();
+    assert_eq!(traced_paths(&node(&s, NodeId(r["id"].as_u64().unwrap()))).len(), 3);
+    s.execute("imageTrace.make", &json!({"preset": "6 Colors", "params": {"ignoreWhite": true, "autoGrouping": true}})).unwrap();
+    let r = s.execute("imageTrace.expand", &json!({})).unwrap();
+    let expanded = node(&s, NodeId(r["ids"][0].as_u64().unwrap()));
+    assert_eq!(expanded.children().unwrap().len(), 2);
+}
+
+/// Gradients: an image that is one linear gradient is one path filled with it, the gradient's line
+/// where the image lies; without the option it is bands of flat colour, as saved documents have it.
+#[test]
+fn image_trace_gradients_fills_with_a_gradient() {
+    let art = vectorcraft_trace::Raster::from_fn(100, 60, |x, _| {
+        let t = (f64::from(x) + 0.5) / 100.0;
+        [(20.0 + 200.0 * t) as u8, 40, (220.0 - 180.0 * t) as u8, 255]
+    });
+    let make = |gradients: bool| {
+        let mut s = session();
+        add_image(&mut s, &art, Affine::translate((50.0, 50.0)) * Affine::scale(2.0));
+        let r = s.execute("imageTrace.make", &json!({"preset": "6 Colors", "params": {"gradients": gradients}})).unwrap();
+        traced_paths(&node(&s, NodeId(r["id"].as_u64().unwrap())))
+    };
+    let paths = make(true);
+    assert_eq!(paths.len(), 1);
+    let Paint::Gradient(g) = paths[0].appearance.fill_paint() else { panic!("{:?}", paths[0].appearance.fill_paint()) };
+    assert_eq!(g.gradient.kind, vectorcraft_color::GradientKind::Linear);
+    assert_eq!(g.gradient.stops.len(), 2);
+    // Level, from the image's left edge (x = 50) to its right one (x = 250), at any height.
+    let geom = g.geom.as_ref().unwrap();
+    let (a, b) = if geom.start.x < geom.end.x { (geom.start, geom.end) } else { (geom.end, geom.start) };
+    assert!((a.x - 50.0).abs() < 3.0 && (b.x - 250.0).abs() < 3.0 && (a.y - b.y).abs() < 2.0, "{geom:?}");
+    let flat = make(false);
+    assert!(flat.len() > 1 && flat.iter().all(|n| matches!(n.appearance.fill_paint(), Paint::Solid { .. })));
+}
+
+/// A preset's enhanced version: the preset with Auto Grouping and Shapes, under the preset's name.
+#[test]
+fn image_trace_enhanced_presets() {
+    let mut s = session();
+    image_doc(&mut s);
+    let r = s.execute("imageTrace.make", &json!({"preset": "6 Colors", "enhanced": true})).unwrap();
+    let n = node(&s, NodeId(r["id"].as_u64().unwrap()));
+    let stored = n.extras().trace.clone().unwrap();
+    assert_eq!(stored["preset"], "6 Colors");
+    assert_eq!((stored["params"]["shapes"].as_bool(), stored["params"]["autoGrouping"].as_bool()), (Some(true), Some(true)));
+    // The disc of the test image is a live ellipse, in a group with nothing (it has nothing inside).
+    let shapes: Vec<_> = traced_paths(&n).into_iter().filter(|c| matches!(&c.kind, NodeKind::Path { live: Some(_), .. })).collect();
+    assert_eq!(shapes.len(), 1);
+    // Listed with each preset; the legacy preset is as it was.
+    let list = s.execute("imageTrace.presets", &json!({})).unwrap();
+    let six = list["presets"].as_array().unwrap().iter().find(|p| p["name"] == "6 Colors").unwrap().clone();
+    assert_eq!((six["params"]["shapes"].as_bool(), six["enhanced"]["shapes"].as_bool()), (Some(false), Some(true)));
+    assert_eq!(list["presets"].as_array().unwrap().iter().find(|p| p["name"] == "High Fidelity Photo").unwrap()["enhanced"]["shapes"], false);
+    assert!(s.execute("imageTrace.make", &json!({"preset": "No Such", "enhanced": true})).is_err());
+    // Flat Logo, a preset of our own, has no enhanced version.
+    assert!(list["presets"].as_array().unwrap().iter().find(|p| p["name"] == "Flat Logo").unwrap()["enhanced"].is_null());
 }
 
 #[test]
@@ -772,7 +1196,8 @@ fn image_trace_create_strokes_makes_stroked_centre_lines() {
     assert!(line.appearance.fill_paint().color().is_none(), "not filled");
     let st = line.appearance.items.iter().find_map(|i| if let AppearanceItem::Stroke(st) = i { Some(st) } else { None }).expect("stroked");
     assert!((st.width - 6.0).abs() < 1.0, "3 px at 2× is about 6 pt: {}", st.width);
-    assert_eq!((st.cap, st.join), (LineCap::Round, LineJoin::Round));
+    // (The line is cut square at its ends, and so is its stroke.)
+    assert_eq!((st.cap, st.join), (LineCap::Square, LineJoin::Round));
     assert_eq!(st.paint, Paint::solid(Color::rgb8(0, 0, 0)));
     let sp = &line.path_data().unwrap().subpaths[0];
     assert!(!sp.closed);
@@ -795,7 +1220,8 @@ fn image_trace_presets_query_and_errors() {
     let mut s = session();
     let r = s.execute("imageTrace.presets", &json!({})).unwrap();
     let names: Vec<&str> = r["presets"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), 15);
+    assert!(names.contains(&"Auto Color") && names.contains(&"Outline"));
     assert!(names.contains(&"Technical Drawing") && names.contains(&"Shades of Gray") && names.contains(&"Flat Logo"));
     let a = rect(&mut s, 0.0, 0.0, 10.0, 10.0);
     assert!(s.execute("imageTrace.make", &json!({"id": a.0})).is_err(), "not an image");
@@ -955,8 +1381,9 @@ fn image_trace_views_draw_on_screen_only_and_expand_to_the_result() {
 /// #569: merging the regions of a rosette of unfilled ellipses (each off the centre, petals
 /// overlapping) merges every region the drags touch into one shape whose outline is only the
 /// merged area's border: no edge between merged regions stays in, as a stray line or a spur.
-#[test]
-fn shape_builder_merges_rosette_rings_cleanly() {
+/// Petal `k` turns about the center by 45° × `k`, or by each angle `turns` lists for it in turn.
+#[track_caller]
+fn rosette_rings_merge_cleanly(turns: &[(u32, &[f64])]) {
     let mut s = session();
     s.execute("paint.setFill", &json!({"none": true})).unwrap();
     let c = [400.0, 320.0];
@@ -965,7 +1392,10 @@ fn shape_builder_merges_rosette_rings_cleanly() {
         let id =
             s.execute("shape.ellipse", &json!({"x": c[0] - 60.0, "y": c[1] - 172.0, "width": 120, "height": 324})).unwrap()["id"].as_u64().unwrap();
         s.execute("select.set", &json!({"ids": [id]})).unwrap();
-        s.execute("object.rotate", &json!({"angle": 45.0 * f64::from(k), "origin": c})).unwrap();
+        let angles = turns.iter().find(|t| t.0 == k).map_or_else(|| vec![45.0 * f64::from(k)], |t| t.1.to_vec());
+        for angle in angles {
+            s.execute("object.rotate", &json!({"angle": angle, "origin": c})).unwrap();
+        }
         petals.push(id);
     }
     s.execute("select.set", &json!({"ids": petals})).unwrap();
@@ -1014,4 +1444,19 @@ fn shape_builder_merges_rosette_rings_cleanly() {
     // An inner edge would be a second outline over the merged area: normalising would drop it.
     let clean = vectorcraft_pathops::normalize(&ring, rule);
     assert!((ring.length() - clean.length()).abs() < 1.0, "{} pt of outline, {} without inner edges", ring.length(), clean.length());
+}
+
+#[test]
+fn shape_builder_merges_rosette_rings_cleanly() {
+    rosette_rings_merge_cleanly(&[]);
+}
+
+/// #1770: the rosette merges as cleanly with a petal turned by an equivalent angle (-180° for 180°,
+/// -855° for 225°, -45° for 315°) or in two steps, which moves its outline by a rounding error.
+#[test]
+fn shape_builder_merges_rosette_rings_cleanly_however_a_petal_turns() {
+    rosette_rings_merge_cleanly(&[(4, &[-180.0])]);
+    rosette_rings_merge_cleanly(&[(5, &[-855.0])]);
+    rosette_rings_merge_cleanly(&[(7, &[-45.0])]);
+    rosette_rings_merge_cleanly(&[(4, &[100.0, 80.0])]);
 }

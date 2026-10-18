@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use vectorcraft_color::Paint;
 use vectorcraft_doc::{Document, Node, NodeId, NodeKind};
 
+use super::wand::{fill_of, stroke_of};
 use super::*;
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -65,7 +66,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Cancel Key Object",
             [],
             None,
-            "{id?: a selected top-level object (not a layer, a compound-path member or an object inside another selected object), one of two or more (the Selection tool: a click on one object of a selection of several; on the key again: no id)} the key object Align aligns to and Distribute Spacing spaces from; without `id` it cancels the key, as does a selection that holds only the key and objects inside it (one object, or a group key and its own members); any other id is an error that leaves the key as it was → {key} (the resulting key object, or null)",
+            "{id?: a selected top-level object (not a layer, a compound-path member or an object inside another selected object); one of two or more (the Selection tool: a click on one object of a selection of several; on the key again: no id)} the key object Align aligns to and Distribute Spacing spaces from; without `id` it cancels the key, as does a selection that holds only the key and objects inside it (one object, or a group key and its own members); any other id is an error that leaves the key as it was → {key} (the resulting key object, or null)",
             has_doc,
             key
         ),
@@ -84,7 +85,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Select Anchors",
             [],
             None,
-            "{items: [{id, anchors}], mode?: \"set\"|\"add\"|\"toggle\"|\"subtract\" (set by default; add: true is mode add)}: toggle selects the anchors not selected and deselects the others, subtract deselects them; a path left with none leaves the selection",
+            "{items: [{id, anchors}], mode?: \"set\"|\"add\"|\"toggle\"|\"subtract\" (set by default; add: true is mode add), add?: bool (an older way to ask for mode add)}: toggle selects the anchors not selected and deselects the others, subtract deselects them; a path left with none leaves the selection",
             has_doc,
             anchors_many
         ),
@@ -97,7 +98,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, _| {
                 let tint = s.prefs.select_same_tint_percent;
-                same(s, "select.same.fillColor", |a, b| same_paint(&a.appearance.fill_paint(), &b.appearance.fill_paint(), tint))
+                same(s, "select.same.fillColor", |a, b| same_paint(&fill_of(a), &fill_of(b), tint))
             }
         ),
         cmd!(
@@ -109,13 +110,13 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, _| {
                 let tint = s.prefs.select_same_tint_percent;
-                same(s, "select.same.strokeColor", |a, b| same_paint(&a.appearance.stroke_paint(), &b.appearance.stroke_paint(), tint))
+                same(s, "select.same.strokeColor", |a, b| same_paint(&stroke_of(a).0, &stroke_of(b).0, tint))
             }
         ),
         cmd!("select.same.strokeWeight", "Stroke Weight", ["Select", "Same"], None, "{}", has_selection, |s, _| same(
             s,
             "select.same.strokeWeight",
-            |a, b| (a.appearance.stroke_width() - b.appearance.stroke_width()).abs() < 1e-9
+            |a, b| (stroke_weight(a) - stroke_weight(b)).abs() < 1e-9
         )),
         cmd!(
             "select.same.fillAndStroke",
@@ -127,8 +128,7 @@ pub fn specs() -> Vec<CommandSpec> {
             |s, _| {
                 let tint = s.prefs.select_same_tint_percent;
                 same(s, "select.same.fillAndStroke", |a, b| {
-                    let (x, y) = (&a.appearance, &b.appearance);
-                    same_paint(&x.fill_paint(), &y.fill_paint(), tint) && same_paint(&x.stroke_paint(), &y.stroke_paint(), tint)
+                    same_paint(&fill_of(a), &fill_of(b), tint) && same_paint(&stroke_of(a).0, &stroke_of(b).0, tint)
                 })
             }
         ),
@@ -259,9 +259,16 @@ fn all_on_artboard(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.doc()?;
     let i = p.get("artboard").and_then(Value::as_u64).unwrap_or(0) as usize;
     let r = st.doc.artboards.get(i).map(|a| a.rect).ok_or_else(|| bad("select.allOnArtboard", "no such artboard"))?;
+    // Symbol instances are measured by their art.
+    let symbols = st.doc.symbol_boxes();
     let ids: Vec<NodeId> = selectable(&st.doc, st.isolation)
         .into_iter()
-        .filter(|id| st.doc.node(*id).and_then(|n| n.geometric_bounds()).is_some_and(|b| b.intersect(r).area() > 0.0 || r.contains(b.center())))
+        .filter(|id| {
+            st.doc
+                .node(*id)
+                .and_then(|n| n.geometric_bounds_with(&symbols))
+                .is_some_and(|b| b.intersect(r).area() > 0.0 || vectorcraft_doc::artboard_holds(r, b.center()))
+        })
         .collect();
     s.select(|_, sel| sel.set(ids.iter().copied()))?;
     ok()
@@ -512,6 +519,13 @@ fn same_paint(a: &Paint, b: &Paint, tint: bool) -> bool {
         (Paint::Solid { swatch: Some(x), tint: ta, .. }, Paint::Solid { swatch: Some(y), tint: tb, .. }) if x == y => !tint || (ta - tb).abs() < 1e-4,
         _ => a == b,
     }
+}
+
+/// Select › Same › Stroke Weight: an unpainted stroke weighs nothing, as
+/// [`vectorcraft_doc::Appearance::stroke_width`] has it.
+fn stroke_weight(n: &Node) -> f64 {
+    let (paint, width) = stroke_of(n);
+    if paint.is_none() { 0.0 } else { width }
 }
 
 fn same(s: &mut Session, cmd: &str, eq: impl Fn(&Node, &Node) -> bool) -> Result<Value> {

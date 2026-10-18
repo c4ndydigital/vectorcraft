@@ -16,7 +16,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Change Case",
             ["Type", "Change Case"],
             None,
-            "{case: \"upper\"|\"lower\"|\"title\"|\"sentence\", ids?} → {ids}",
+            "{case: \"upper\"|\"lower\"|\"title\"|\"sentence\", ids?|id?} → {ids}",
             has_selection,
             change_case
         ),
@@ -34,7 +34,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Convert To Area Type",
             ["Type"],
             None,
-            "{ids?} point type → area type framed by its current layout bounds → {ids}",
+            "{ids?|id?} point type → area type framed by its current layout bounds → {ids}",
             has_selection,
             to_area
         ),
@@ -43,7 +43,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Convert To Point Type",
             ["Type"],
             None,
-            "{ids?} area type → point type; soft line wraps become line breaks → {ids}",
+            "{ids?|id?} area type → point type; soft line wraps become line breaks → {ids}",
             has_selection,
             to_point
         ),
@@ -52,7 +52,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Type on a Path Options…",
             ["Type", "Type on a Path"],
             None,
-            "{ids?, start?: 0..1, end?: 0..1|null, flip?: bool, effect?: rainbow|skew|3dRibbon|stairStep|gravity, alignToPath?: ascender|descender|center|baseline, spacing?: pt} set the selected type on a path's options: start and end place its start and end brackets as fractions of the path's length (end null: the end of the path, or once round a closed path), and flip then turns the type to the other side of its path (the path runs the other way, the brackets swap ends); none given: query → the first object's {start, end, flip: false, effect, alignToPath, spacing}",
+            "{ids?|id?, start?: 0..1, end?: 0..1|null, flip?: bool, effect?: rainbow|skew|3dRibbon|stairStep|gravity, alignToPath?: ascender|descender|center|baseline, spacing?: pt} set the selected type on a path's options: start and end place its start and end brackets as fractions of the path's length (end null: the end of the path, or once round a closed path), and flip then turns the type to the other side of its path (the path runs the other way, the brackets swap ends); none given: query → the first object's {start, end, flip: false, effect, alignToPath, spacing}",
             has_selection,
             path_options
         ),
@@ -61,7 +61,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Fill with Placeholder Text",
             ["Type"],
             None,
-            "{ids?} replace selected text with placeholder text (area type is filled to its frame) → {ids}",
+            "{ids?|id?} replace selected text with placeholder text (area type is filled to its frame) → {ids}",
             has_selection,
             fill_placeholder
         ),
@@ -70,7 +70,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Insert Character",
             ["Type"],
             None,
-            "{char: \"bullet\"|\"copyright\"|\"ellipsis\"|\"paragraph\"|\"registered\"|\"section\"|\"trademark\"|\"emDash\"|\"enDash\"|\"discretionaryHyphen\"|\"nonBreakingHyphen\"|\"doubleLeftQuote\"|\"doubleRightQuote\"|\"singleLeftQuote\"|\"singleRightQuote\"|\"emSpace\"|\"enSpace\"|\"hairSpace\"|\"sixthSpace\"|\"thinSpace\"|\"nonBreakingSpace\"|\"figureSpace\"|\"punctuationSpace\"|\"thirdSpace\"|\"quarterSpace\"|\"tab\"|\"forcedLineBreak\"|\"paragraphReturn\" | text: string} append to the selected text objects",
+            "{char: \"bullet\"|\"copyright\"|\"ellipsis\"|\"paragraph\"|\"registered\"|\"section\"|\"trademark\"|\"emDash\"|\"enDash\"|\"discretionaryHyphen\"|\"nonBreakingHyphen\"|\"doubleLeftQuote\"|\"doubleRightQuote\"|\"singleLeftQuote\"|\"singleRightQuote\"|\"emSpace\"|\"enSpace\"|\"hairSpace\"|\"sixthSpace\"|\"thinSpace\"|\"nonBreakingSpace\"|\"figureSpace\"|\"punctuationSpace\"|\"thirdSpace\"|\"quarterSpace\"|\"tab\"|\"forcedLineBreak\"|\"paragraphReturn\" | text: string, ids?|id?: object ids (default: the selection)} append to the selected text objects",
             has_selection,
             insert_char
         ),
@@ -665,16 +665,39 @@ fn find_replace(s: &mut Session, p: &Value) -> Result<Value> {
     if total == 0 {
         return Ok(json!({ "count": 0 }));
     }
-    edit_runs::<()>(s, "Replace", &ids, |text, _| {
-        let mut out = String::with_capacity(text.len());
-        let mut last = 0;
-        for (a, b) in find_all(text, &find, mc, ww) {
-            out.push_str(&text[last..a]);
-            out.push_str(&rep);
-            last = b;
+    super::overprint::edit_counted(s, "Replace", |d| {
+        let mut changed = 0;
+        for id in &ids {
+            let Some(NodeKind::Text(t)) = d.node_mut(*id).map(|n| &mut n.kind) else { continue };
+            // Matches as (run, start, end) with offsets inside the run. Inline graphics are art, not
+            // characters to rewrite.
+            let mut hits = vec![];
+            let mut base = 0;
+            for (ri, r) in t.runs.iter().enumerate() {
+                if r.inline.is_none() {
+                    for (a, b) in find_all(&r.text, &find, mc, ww) {
+                        if r.text.get(a..b) != Some(rep.as_str()) {
+                            hits.push((ri, base + a, base + b, a, b));
+                        }
+                    }
+                }
+                base += r.text.len();
+            }
+            if hits.is_empty() {
+                continue;
+            }
+            // Last match first, so the offsets of earlier ones stay valid. The paragraph styles follow
+            // each edit, as `text.editRange` does.
+            for (ri, ta, tb, a, b) in hits.into_iter().rev() {
+                t.splice_paras(ta, tb, &rep);
+                if let Some(r) = t.runs.get_mut(ri) {
+                    r.text.replace_range(a..b, &rep);
+                }
+            }
+            changed += 1;
+            refresh_bounds(t);
         }
-        out.push_str(&text[last..]);
-        out
+        Ok(changed)
     })?;
     Ok(json!({ "count": total }))
 }

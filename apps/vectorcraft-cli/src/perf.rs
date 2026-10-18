@@ -1,7 +1,8 @@
 //! `vectorcraft-cli perf`: the performance budgets (plan §4) measured on a synthetic document.
 //!
-//! Each row is the median of several runs. Timings are wall-clock: on a busy machine (load
-//! average above the core count) they are noise, and the report says so.
+//! Each row is the median of several runs. Timings are wall-clock: on a busy machine (a load
+//! average above three quarters of the cores, or on Windows more than three quarters of the
+//! cores busy over a second) they are noise, and the report says so.
 
 use std::time::Instant;
 
@@ -61,6 +62,7 @@ fn median_ms(runs: usize, mut f: impl FnMut()) -> f64 {
 }
 
 /// 1-minute load average (macOS / Linux), if available.
+#[cfg(not(windows))]
 fn load_average() -> Option<f64> {
     let out = std::process::Command::new("sysctl").args(["-n", "vm.loadavg"]).output().ok().filter(|o| o.status.success());
     let text = match out {
@@ -68,6 +70,27 @@ fn load_average() -> Option<f64> {
         None => std::fs::read_to_string("/proc/loadavg").ok()?,
     };
     text.split_whitespace().map(|t| t.trim_matches(|c| c == '{' || c == '}')).find_map(|t| t.parse().ok())
+}
+
+/// The cores busy on average over one second (Windows), if available: the share of the
+/// processors' time that `GetSystemTimes` reports as kernel or user time but not as idle time,
+/// times `cores`. A load average also counts the threads waiting for a core.
+#[cfg(windows)]
+fn busy_cores(cores: usize) -> Option<f64> {
+    let times = || winsafe::GetSystemTimes().ok().map(|(idle, kernel, user)| [idle, kernel, user].map(u64::from));
+    let before = times()?;
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    busy_share(before, times()?).map(|share| share * cores as f64)
+}
+
+/// The share of the processors' time between two `[idle, kernel, user]` readings of
+/// `GetSystemTimes` that was busy (kernel time includes idle time). It is None when no time
+/// passed, a time went back, or the idle time exceeds the kernel and user time.
+#[cfg(any(windows, test))]
+fn busy_share([idle0, kernel0, user0]: [u64; 3], [idle1, kernel1, user1]: [u64; 3]) -> Option<f64> {
+    let total = kernel1.checked_sub(kernel0)?.checked_add(user1.checked_sub(user0)?)?;
+    let busy = total.checked_sub(idle1.checked_sub(idle0)?)?;
+    (total > 0).then(|| busy as f64 / total as f64)
 }
 
 /// Milliseconds per pointer move of a Direct Selection drag of a handle, then of a segment, of a
@@ -113,22 +136,63 @@ fn edit_drags(n: usize) -> Result<(f64, f64), String> {
     Ok((handle, segment))
 }
 
-/// Resident memory of this process in MB (`ps`), if available.
-fn rss_mb() -> Option<f64> {
+/// Resident memory of this process in MB (`ps`), if available, with the most it has held so far
+/// on Linux (`VmHWM` in `/proc/self/status`). The peak is None on macOS, which has no `/proc`.
+#[cfg(not(windows))]
+fn rss_mb() -> Option<(f64, Option<f64>)> {
     let pid = std::process::id().to_string();
     let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &pid]).output().ok().filter(|o| o.status.success())?;
-    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().ok().map(|kb| kb / 1024.0)
+    let peak = std::fs::read_to_string("/proc/self/status").ok().and_then(|status| vm_hwm_mb(&status));
+    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().ok().map(|kb| (kb / 1024.0, peak))
+}
+
+/// The peak resident set size in MB from the `VmHWM` line of a `/proc/<pid>/status` text, which
+/// gives it in kB. It is None when the text has no `VmHWM` line in kB.
+#[cfg(any(not(windows), test))]
+fn vm_hwm_mb(status: &str) -> Option<f64> {
+    let kb = status.lines().find_map(|line| line.strip_prefix("VmHWM:"))?.trim().strip_suffix("kB")?.trim().parse::<f64>().ok()?;
+    Some(kb / 1024.0)
+}
+
+/// The working set of this process in MB (`GetProcessMemoryInfo`), if available: its pages that
+/// are in physical memory, the figure `ps` reports as resident memory elsewhere. The same call
+/// gives the peak working set, the most the working set has held so far.
+#[cfg(windows)]
+fn rss_mb() -> Option<(f64, Option<f64>)> {
+    let counters = winsafe::HPROCESS::GetCurrentProcess().GetProcessMemoryInfo().ok()?;
+    let mb = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+    Some((mb(counters.WorkingSetSize), Some(mb(counters.PeakWorkingSetSize))))
+}
+
+/// A tracked row of `--deep`: the work's name and its median in ms. Names are padded to 54
+/// characters.
+fn tracked_row(name: &str, ms: f64) -> String {
+    format!("  {name:<54} {ms:>10.2} ms")
+}
+
+/// A memory row of `--deep`: the reading's name and value in MB, then the peak so far when
+/// there is one. Names are padded to 56 characters.
+fn memory_row(name: &str, mb: f64, peak: Option<f64>) -> String {
+    let peak = peak.map_or_else(String::new, |peak| format!("  peak {peak:>8.0} MB"));
+    format!("  {name:<56} {mb:>8.0} MB{peak}")
+}
+
+/// A row of the budget table: the budget's name, the median and the budget in ms, then "ok" or
+/// "OVER". Names are padded to 42 characters, as in the table's header.
+fn budget_row(name: &str, ms: f64, budget: f64, ok: bool) -> String {
+    format!("  {name:<42} {ms:>8.2} ms {budget:>7.0} ms  {}", if ok { "ok" } else { "OVER" })
 }
 
 /// `--deep`: tracked rows (no budget yet) for work the budgets above don't reach: editing a whole
-/// selection, live effects, every Pathfinder operation, typing in a long story, and memory.
+/// selection, live effects, every Pathfinder operation, typing in a long story, and memory, with
+/// the peak so far where `rss_mb` reads one.
 fn deep(n: usize) -> Result<(), String> {
     let err = |e: vectorcraft_engine::EngineError| e.to_string();
     let mut rows: Vec<(String, f64)> = vec![];
-    let mut mem: Vec<(String, f64)> = vec![];
+    let mut mem: Vec<(String, f64, Option<f64>)> = vec![];
     let mut note = |what: &str| {
-        if let Some(m) = rss_mb() {
-            mem.push((what.to_string(), m));
+        if let Some((m, peak)) = rss_mb() {
+            mem.push((what.to_string(), m, peak));
         }
     };
     note("start");
@@ -239,12 +303,15 @@ fn deep(n: usize) -> Result<(), String> {
     let saved = vectorcraft_format::save_file(&doc);
     let reopened = vectorcraft_format::load(&saved).map_err(|e| e.to_string())?;
     outln!("  output hash: SVG export {:016x}, save→open→save {:016x}", fnv(svg.as_bytes()), fnv(&vectorcraft_format::save_file(&reopened)));
+    note("after the SVG export and save→open→save");
     outln!("  tracked (no budget yet)");
     for (name, ms) in &rows {
-        outln!("  {name:<52} {ms:>10.2} ms");
+        outln!("{}", tracked_row(name, *ms));
     }
-    for (what, mb) in &mem {
-        outln!("  memory {what:<45} {mb:>8.0} MB");
+    // `rss_mb` reads the working set on Windows.
+    let memory = if cfg!(windows) { "working set" } else { "memory" };
+    for (what, mb, peak) in &mem {
+        outln!("{}", memory_row(&format!("{memory} {what}"), *mb, *peak));
     }
     Ok(())
 }
@@ -261,8 +328,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
-    let load = load_average();
-    outln!("VectorCraft performance budgets — {n} paths, {cores} cores, load average {}", load.map_or("?".into(), |l| format!("{l:.1}")));
+    // The figure is the 1-minute load average, or on Windows the cores busy over one second.
+    #[cfg(not(windows))]
+    let (load, label) = (load_average(), "load average");
+    #[cfg(windows)]
+    let (load, label) = (busy_cores(cores), "cores busy");
+    outln!("VectorCraft performance budgets — {n} paths, {cores} cores, {label} {}", load.map_or("?".into(), |l| format!("{l:.1}")));
     let noisy = load.is_some_and(|l| l > cores as f64 * 0.75);
     if noisy {
         outln!("WARNING: the machine is busy; wall-clock timings below are not trustworthy.");
@@ -343,11 +414,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 
     let mut over = 0;
-    outln!("  {:<40} {:>10} {:>10}", "", "measured", "budget");
+    outln!("  {:<42} {:>10} {:>10}", "", "measured", "budget");
     for (name, ms, budget) in &rows {
         let ok = ms <= budget;
         over += usize::from(!ok);
-        outln!("  {name:<40} {ms:>8.2} ms {budget:>7.0} ms  {}", if ok { "ok" } else { "OVER" });
+        outln!("{}", budget_row(name, *ms, *budget, ok));
     }
     match (over, noisy) {
         (0, _) => Ok(()),
@@ -356,5 +427,90 @@ pub fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         _ => Err(format!("{over} budget(s) exceeded")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_share_leaves_out_idle_time() {
+        // In one second four processors log 40,000,000 ticks of 100 ns of kernel and user time,
+        // 10,000,000 of them idle.
+        assert_eq!(busy_share([7, 100, 50], [10_000_007, 25_000_100, 15_000_050]), Some(0.75));
+        // There is no share when no time passed, a time went back, or the idle time exceeds the
+        // kernel and user time.
+        assert_eq!(busy_share([7, 100, 50], [7, 100, 50]), None);
+        assert_eq!(busy_share([7, 100, 50], [8, 99, 60]), None);
+        assert_eq!(busy_share([0, 0, 0], [30, 10, 10]), None);
+    }
+
+    /// On Windows `busy_cores` gives a number between 0 and the cores.
+    #[cfg(windows)]
+    #[test]
+    fn windows_reads_how_many_cores_are_busy() {
+        let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
+        let busy = busy_cores(cores);
+        assert!(busy.is_some_and(|b| (0.0..=cores as f64).contains(&b)), "{busy:?} of {cores}");
+    }
+
+    /// On Windows `rss_mb` gives this process's working set: more than 0 MB and less than
+    /// 10,000 MB.
+    #[cfg(windows)]
+    #[test]
+    fn windows_reads_the_working_set() {
+        let mb = rss_mb().map(|(mb, _)| mb);
+        assert!(mb.is_some_and(|mb| mb > 0.0 && mb < 10_000.0), "{mb:?}");
+    }
+
+    /// On Windows and Linux `rss_mb` also gives the peak: after this test writes 64 MB and frees
+    /// it, the peak is no more than 16 MB below the resident memory read while it held the 64 MB.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn freed_memory_stays_in_the_peak() {
+        let buffer = std::hint::black_box(vec![1u8; 64 << 20]);
+        let held = rss_mb();
+        drop(buffer);
+        let (Some((held, _)), Some((now, peak))) = (held, rss_mb()) else {
+            eprintln!("no memory reading (Linux without `ps`): nothing to check");
+            return;
+        };
+        assert!(peak.is_some_and(|peak| peak > held - 16.0), "holding 64 MB: {held:.1} MB, after freeing it: {now:.1} MB, peak {peak:?}");
+    }
+
+    /// `vm_hwm_mb` reads the peak resident set size from the `VmHWM` line of a status text that
+    /// also has a `VmRSS` line.
+    #[test]
+    fn vm_hwm_is_the_peak_resident_set_size() {
+        let status = "Name:\tvectorcraft-cli\nVmPeak:\t 2097152 kB\nVmSize:\t 1572864 kB\nVmHWM:\t  819200 kB\nVmRSS:\t  204800 kB\n";
+        assert_eq!(vm_hwm_mb(status), Some(800.0));
+        // A text without a `VmHWM` line gives no peak.
+        assert_eq!(vm_hwm_mb("Name:\tkthreadd\nState:\tS (sleeping)\n"), None);
+    }
+
+    /// A memory row ends with the peak when there is one; without a peak it ends with the value
+    /// in MB. With the longest name on Windows, the value and the peak line up with the other rows.
+    #[test]
+    fn memory_rows_end_with_the_peak_when_there_is_one() {
+        let row = memory_row("working set start", 346.4, Some(470.2));
+        assert!(row.starts_with("  working set start ") && row.ends_with(" 346 MB  peak      470 MB"), "{row}");
+        let longest = memory_row("working set after rendering the photos with 3 renderers", 2514.0, Some(2541.0));
+        assert_eq!(longest.chars().count(), row.chars().count(), "{longest}\n{row}");
+        let row = memory_row("memory start", 346.4, None);
+        assert!(row.starts_with("  memory start ") && row.ends_with(" 346 MB") && !row.contains("peak"), "{row}");
+    }
+
+    /// With the longest names, the values of a tracked row and of the budget table's rows line
+    /// up with the rows that have short names.
+    #[test]
+    fn the_longest_tracked_and_budget_names_fit_their_columns() {
+        let longest = tracked_row("render 4 embedded 24 MP photos with 3 renderers (cold)", 774.61);
+        let short = tracked_row("Pathfinder crop, 300 paths", 30.94);
+        assert_eq!(longest.chars().count(), short.chars().count(), "{longest}\n{short}");
+        for name in ["handle drag, 5,000-anchor path (per move)", "segment drag, 5,000-anchor path (per move)"] {
+            let (longest, short) = (budget_row(name, 0.12, 8.0, true), budget_row("export SVG", 7.81, 500.0, true));
+            assert_eq!(longest.chars().count(), short.chars().count(), "{longest}\n{short}");
+        }
     }
 }

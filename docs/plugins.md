@@ -23,8 +23,8 @@ This page is the contract for plug-in authors and the reference for the host (`c
 | `plugin.list` | `{}` | `{"plugins": [{id, name, version, kind, author, description, params, paramsSchema, effect?, size, source}], "folder": report}` |
 | `plugin.info` | `{"id"}` | One plug-in: the `plugin.list` entry plus `manifest`, `defaults` and `lastError` (a live effect's last failure). |
 | `plugin.run` | `{"id", "params"?: {…}, "ids"?: [...]}` (plug-in params may also be top-level keys) | Runs an object filter on the selection (or `ids`). One undo step; the result is selected. |
-| `plugin.install` | `{"path": "/x/y.wasm"}` (desktop) or `{"dataBase64": "…", "name"?}`, `"replace": bool = true` | Validates and installs a module; returns its `plugin.list` entry. |
-| `plugin.remove` | `{"id"}` | Uninstalls. |
+| `plugin.install` | `{"path": "/x/y.wasm"}` (desktop) or `{"dataBase64": "…", "name"?}`, `"replace": bool = true` | Validates and installs a module; returns its `plugin.list` entry. The desktop app and `vectorcraft-cli` keep it in the `Plug-ins` folder next to the preferences, so it is installed again after a restart (#2541). |
+| `plugin.remove` | `{"id"}` | Uninstalls, and deletes it from the `Plug-ins` folder. |
 | `plugin.reload` | `{"path"?: "folder"}` (default: the preference folder) | Installs every `*.wasm` in a folder; a bad module is reported and skipped. |
 
 Live effects are applied like any effect: `effect.apply {"effect": "plugin.<id>", "params": {…}}`, edited with
@@ -33,7 +33,8 @@ Live effects are applied like any effect: `effect.apply {"effect": "plugin.<id>"
 In the app, installed filters appear under **Object › Plug-ins**, next to **Install Plug-in…** and **Reload
 Plug-ins**; live effects under **Effect › Plug-ins** and in the Appearance panel's effect menu. A plug-in with
 parameters gets a dialog generated from its schema (numbers, whole numbers, checkboxes, dropdowns) with a live
-preview; without parameters it runs at once. **File › Open** of a `.wasm` file installs it too (on the web this is
+preview; without parameters it runs at once. Parameters too many for the window's height scroll inside the dialog,
+which keeps its heading and buttons in view. **File › Open** of a `.wasm` file installs it too (on the web this is
 how plug-ins get in).
 
 **Preference folder.** Edit › Preferences › Performance & Storage › *Additional Plug-ins Folder*: when set, every
@@ -111,7 +112,8 @@ pointers are offsets into the module's memory.
 - `name`: the menu label (1–64 printable characters). `kind`: `"filter"` (object filter) or `"effect"` (live effect).
 - `params`: in dialog order. Names are `[A-Za-z0-9_]`, not starting with `_`, and not `id`, `ids`, `params` or
   `preview`. The host validates the user's values before calling: missing values take the default, numbers are
-  clamped to `min..max` (ints rounded), a wrong type or an unknown choice is an error.
+  clamped to `min..max` (ints rounded), a wrong type or an unknown choice is an error. Numeric defaults
+  are also clamped to their range, including the implicit zero default of an `int` parameter.
 
 ### Input
 

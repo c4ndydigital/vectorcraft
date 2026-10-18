@@ -19,9 +19,11 @@
 
 mod frames;
 mod lex;
+mod mesh;
 mod obj;
 mod paint;
 mod read;
+mod style;
 
 use std::io::Read as _;
 
@@ -29,7 +31,7 @@ use super::lex::find;
 use crate::ps;
 
 pub(crate) use frames::text_frames;
-pub use read::{Structure, artboards, read};
+pub use read::{Structure, artboards, read, variables};
 pub(crate) use read::{slot_frame, slot_of};
 
 #[cfg(test)]

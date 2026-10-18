@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use vectorcraft_doc::{Document, ImageBlob};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use atomic::{write_atomic, write_atomic_with, write_new_with};
+pub use atomic::{sync_file, write_atomic, write_atomic_with, write_new_with};
 use stream::{Gz, Indent, KeyScan, Out};
 
 /// v4: large data after the JSON (v1 to v3 files still load).
@@ -243,11 +243,30 @@ impl SaveOptions {
         Ok(())
     }
 
-    /// The defaults for saving `doc` to disk: pretty when small (see [`PRETTY_MAX_OBJECTS`]).
+    /// The defaults for saving `doc` to disk: pretty when small (see [`PRETTY_MAX_OBJECTS`] and
+    /// [`PRETTY_MAX_BYTES`]).
     pub fn for_doc(doc: &Document) -> Self {
         let objects: usize = doc.layers.iter().map(|l| l.count()).sum();
-        Self { pretty: objects <= PRETTY_MAX_OBJECTS, ..Self::default() }
+        Self { pretty: objects <= PRETTY_MAX_OBJECTS && compact_size_at_most(doc, PRETTY_MAX_BYTES), ..Self::default() }
     }
+}
+
+/// Is `doc` at most `limit` bytes as compact JSON? Serializing stops as soon as it is past the
+/// limit, so a large document costs no more than `limit` bytes of work.
+fn compact_size_at_most(doc: &Document, limit: usize) -> bool {
+    struct Capped {
+        left: usize,
+    }
+    impl Write for Capped {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.left = self.left.checked_sub(buf.len()).ok_or_else(|| std::io::Error::other("over the limit"))?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Capped { left: limit }, doc).is_ok()
 }
 
 /// Serialize a document (pretty = human-diffable) in the current version. Editing-mode working
@@ -259,6 +278,11 @@ pub fn save(doc: &Document, pretty: bool) -> Vec<u8> {
 /// Documents up to this many objects are saved pretty-printed (readable, diffable); larger ones
 /// compact, where indentation would multiply the file size and slow opening down.
 pub const PRETTY_MAX_OBJECTS: usize = 2000;
+
+/// Documents whose compact JSON is larger than this are saved compact even with few objects:
+/// pretty-printing spreads every path anchor over several lines, so traced or generated art (in
+/// layers, symbols or patterns alike) would grow about tenfold.
+pub const PRETTY_MAX_BYTES: usize = 1 << 20;
 
 /// Serialize for saving to disk: pretty when small, compact when large.
 pub fn save_file(doc: &Document) -> Vec<u8> {
@@ -458,6 +482,9 @@ pub fn load(bytes: &[u8]) -> Result<Document, FormatError> {
 #[derive(Debug)]
 pub struct NativeFile {
     pub doc: Document,
+    /// What was done to bring the document within the nesting caps
+    /// ([`Document::limit_depth_noting`]: a file saved before them, or a damaged one).
+    pub depth_notes: Vec<String>,
     pub info: FileInfo,
     /// ICC files by profile name (saved with Embed ICC Profiles; undecodable ones are left out).
     pub profiles: BTreeMap<String, Vec<u8>>,
@@ -487,7 +514,11 @@ pub fn load_info(bytes: &[u8]) -> Result<(Document, FileInfo), FormatError> {
 /// [`load`], with everything else the file carries.
 pub fn load_file(bytes: &[u8]) -> Result<NativeFile, FormatError> {
     let file = unpack::Unpacked::new(bytes)?;
-    let f: File = serde_json::from_slice(file.json()).map_err(|e| FormatError::NotVectorcraft(e.to_string()))?;
+    // The JSON reader stops at 128 levels (a document's objects use three each).
+    let f: File = serde_json::from_slice(file.json()).map_err(|e| {
+        let why = if e.to_string().contains("recursion limit") { format!("its objects are nested too deep ({e})") } else { e.to_string() };
+        FormatError::NotVectorcraft(why)
+    })?;
     if f.format != EXTENSION && f.format != LEGACY_EXTENSION {
         return Err(FormatError::NotVectorcraft(format!("format is `{}`", f.format)));
     }
@@ -518,11 +549,25 @@ pub fn load_file(bytes: &[u8]) -> Result<NativeFile, FormatError> {
     // Saved before v3: the assigned profiles move out of `unknown`.
     doc.migrate_color_profiles();
     doc.fix_next_id();
+    // Untrusted: the bleed and type proportions, within the ranges Document Setup takes.
+    doc.setup.keep_in_range();
     // Untrusted: capped, named and pointing at objects the file has.
     doc.tidy_saved_selections();
     doc.tidy_graph_designs();
+    doc.raster_effects.add_around = doc.raster_effects.add_around.clamp(0.0, vectorcraft_doc::rastersettings::MAX_ADD_AROUND);
+    let mut depth_notes = vec![];
+    doc.limit_depth_noting(&mut depth_notes);
+    // Untrusted: the type's sizes, leading, baseline shifts and scales, its indents and paragraph
+    // spacing, and its tab stops, each within its range (after the depth limit: the walk recurses).
+    doc.keep_type_values_in_range();
+    // Untrusted: the raster effects resolution, within 1 to 2400 ppi (72 when it isn't finite).
+    doc.raster_effects_ppi = Some(doc.raster_effects_ppi).filter(|v| v.is_finite()).unwrap_or(72.0).clamp(1.0, 2400.0);
+    // Untrusted: the superscript, subscript and small caps proportions of the type, the graph
+    // labels and the character styles, within the ranges `document.setup` takes (after the depth
+    // limit: the walk recurses).
+    doc.keep_scripts_in_range();
     let profiles = f.profiles.into_iter().filter_map(|(name, icc)| Some((name, bytes_of(&icc)?))).collect();
-    Ok(NativeFile { doc, info: FileInfo { version: f.version, legacy: f.format == LEGACY_EXTENSION }, profiles })
+    Ok(NativeFile { doc, depth_notes, info: FileInfo { version: f.version, legacy: f.format == LEGACY_EXTENSION }, profiles })
 }
 
 /// The members of a native file besides its document (which is skipped, not decoded).

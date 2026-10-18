@@ -97,6 +97,21 @@ notarize() {
   fi
 }
 
+# `stapler validate` looks the ticket up in Apple's CloudKit, and a dropped connection there
+# (NSURLErrorDomain -1005, "Error 68") fails it although the staple worked. Retry with a pause; a
+# missing or bad ticket still fails every try.
+validate_stapled() {
+  local try
+  for try in 1 2 3 4; do
+    xcrun stapler validate "$1" && return 0
+    [ "$try" = 4 ] && break
+    echo "stapler validate failed (try $try of 4); retrying in $((try * 20)) s" >&2
+    sleep $((try * 20))
+  done
+  echo "error: stapler validate $(basename "$1") failed 4 times" >&2
+  exit 1
+}
+
 # ---- VectorCraft.app ----------------------------------------------------------------------------
 echo "==> assembling $APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -109,7 +124,7 @@ sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" \
 plutil -lint "$APP/Contents/Info.plist"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 # The licences of the craft-fonts fonts embedded in the binary (release builds).
-copy_font_licences "$APP/Contents/Resources"
+copy_docs "$APP/Contents/Resources"
 
 # Sign inside-out: nested code first, then the bundle itself (no --deep on the final signature).
 # Today the only nested code is the main executable; frameworks/helpers would be signed here too.
@@ -121,7 +136,7 @@ if [ "$NOTARIZE" = 1 ]; then
   ditto -c -k --keepParent "$APP" "$WORK/VectorCraft-notarize.zip"
   notarize "$WORK/VectorCraft-notarize.zip"
   xcrun stapler staple "$APP"
-  xcrun stapler validate "$APP"
+  validate_stapled "$APP"
   spctl --assess --type execute -vvv "$APP"
 fi
 
@@ -171,7 +186,7 @@ hdiutil_retry detach detach "$MOUNT" >/dev/null
 if [ "$NOTARIZE" = 1 ]; then
   notarize "$DMG"
   xcrun stapler staple "$DMG"
-  xcrun stapler validate "$DMG"
+  validate_stapled "$DMG"
   spctl --assess --type open --context context:primary-signature -vvv "$DMG"
 fi
 

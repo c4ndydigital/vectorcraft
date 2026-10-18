@@ -51,7 +51,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Create from Selection",
             ["Object", "Slice"],
             None,
-            "{ids?} a user slice over the visual bounds of the selected objects (or ids), selected → {id}",
+            "{ids?|id?} a user slice over the visual bounds of the selected objects (or ids), selected → {id}",
             has_selection,
             from_selection
         ),
@@ -96,7 +96,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Slice Options…",
             ["Object", "Slice"],
             None,
-            "{kind?: \"image\"|\"noImage\"|\"htmlText\" (object slices of type only), name?, url?, target?, message?, alt?: (image), text?: cell text, HTML allowed (noImage), background?: \"\"|\"matte\"|\"#rrggbb\", hAlign?: \"default\"|\"left\"|\"center\"|\"right\", vAlign?: \"default\"|\"top\"|\"middle\"|\"baseline\"|\"bottom\"} set the selected slices' options as one undo step; no options: read them → the first slice's {kind, name, url, target, message, alt, text, background, hAlign, vAlign, htmlText: whether HTML Text applies}",
+            "{kind?: \"image\"|\"noImage\"|\"htmlText\" (object slices of type only), name?, url?, target?, message?, alt?: (image), text?: cell text; HTML allowed (noImage), background?: \"\"|\"matte\"|\"#rrggbb\", hAlign?: \"default\"|\"left\"|\"center\"|\"right\", vAlign?: \"default\"|\"top\"|\"middle\"|\"baseline\"|\"bottom\"} set the selected slices' options as one undo step; no options: read them → the first slice's {kind, name, url, target, message, alt, text, background, hAlign, vAlign, htmlText: whether HTML Text applies}",
             slices_targeted,
             options
         ),
@@ -280,7 +280,7 @@ pub(crate) fn options_json(o: &SliceOptions) -> Value {
 
 fn make(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = match ids_param(p, "ids") {
-        Some(ids) => ids,
+        Some(ids) => super::edit::outermost(&s.doc()?.doc, ids),
         None => super::edit::selected_roots(s)?,
     };
     let d = &s.doc()?.doc;

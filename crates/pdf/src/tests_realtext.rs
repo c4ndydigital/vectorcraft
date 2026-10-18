@@ -1,9 +1,11 @@
 //! Real text: type exported as selectable, searchable text in embedded subset fonts with a
 //! ToUnicode map, where the outlines would be; fonts whose licence forbids it stay outlines.
 
+use std::sync::Arc;
+
 use serde_json::json;
 use vectorcraft_color::{Color, Gradient, GradientPaint, Paint};
-use vectorcraft_doc::{CharStyle, Document, Node, NodeKind, TextKind, TextObject, TextRun};
+use vectorcraft_doc::{CharStyle, Document, Effect, Node, NodeKind, TextKind, TextObject, TextRun};
 use vectorcraft_geom::{Affine, BezPath, PathData, Point, Rect};
 use vectorcraft_text::{FALLBACK_FAMILY, FontDb};
 
@@ -74,6 +76,25 @@ fn type_is_written_as_text_in_embedded_subset_fonts() {
     assert_eq!(texts(&import_as(&r.bytes, TextAs::Text)), ["Hello World"]);
     // Outlined text has no font.
     assert!(!String::from_utf8_lossy(&pdf(&d, true).bytes).contains("/Font"));
+}
+
+/// Type that a Transform effect only moves and copies, on the type or on its group, is written as
+/// text, the copies too.
+#[test]
+fn type_copied_by_a_transform_effect_is_written_as_text() {
+    let copies = Effect { id: "distort.transform".into(), params: json!({"moveH": 200, "copies": 1}), visible: true };
+    for on_group in [false, true] {
+        let mut d = Document::new(400.0, 300.0);
+        let mut n = Node::new(d.alloc_id(), NodeKind::Text(Box::new(TextObject::point(Point::new(20.0, 60.0), "Hello", style(24.0)))));
+        if on_group {
+            n = Node::group(d.alloc_id(), vec![Arc::new(n)]);
+        }
+        n.appearance.effects.push(copies.clone());
+        let l = d.layers[0].id;
+        d.insert(Some(l), 0, n).unwrap();
+        let back = import_as(&pdf(&d, false).bytes, TextAs::Text);
+        assert_eq!(texts(&back), ["Hello", "Hello"], "on the group: {on_group}");
+    }
 }
 
 /// A curve type runs along.
@@ -184,6 +205,29 @@ fn variable_font_instances_are_real_text_in_their_own_glyphs() {
     assert!(widths[1] > widths[0] * 1.2, "Bold is wider: {widths:?}");
 }
 
+/// Type with Variable Font settings is real text in a font embedded at those settings: it draws
+/// where its outlines would, between the named instances on either side.
+#[test]
+fn variable_font_settings_are_real_text_in_their_own_glyphs() {
+    use vectorcraft_text::test_fonts::{TWO_AXIS_FAMILY, VARIABLE_CHARS, two_axis_font};
+    FontDb::global().add_font(two_axis_font().unwrap());
+    let mut widths = vec![];
+    for (s, wght) in [("Regular", None), ("Regular", Some(650.0)), ("Bold", None)] {
+        let font_axes = wght.map(|w| [("wght".to_string(), w)].into_iter().collect()).unwrap_or_default();
+        let st = CharStyle { font_family: TWO_AXIS_FAMILY.into(), font_style: s.into(), font_axes, ..style(48.0) };
+        let d = doc(vec![TextObject::point(Point::new(20.0, 80.0), VARIABLE_CHARS, st)]);
+        let r = pdf(&d, false);
+        assert!(r.warnings.is_empty(), "{s} {wght:?}: {:?}", r.warnings);
+        assert_eq!(texts(&import_as(&r.bytes, TextAs::Text)), [VARIABLE_CHARS], "{s} {wght:?}: real text");
+        let (real, outlined) = (ink(&import_as(&r.bytes, TextAs::Outlines)), ink(&import_as(&pdf(&d, true).bytes, TextAs::Outlines)));
+        let off =
+            [real.x0 - outlined.x0, real.y0 - outlined.y0, real.x1 - outlined.x1, real.y1 - outlined.y1].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(off < 0.5, "{s} {wght:?}: {real:?} vs {outlined:?}");
+        widths.push(real.width());
+    }
+    assert!(widths[0] * 1.1 < widths[1] && widths[1] < widths[2], "{widths:?}");
+}
+
 #[test]
 fn gradients_on_real_text_stay_where_they_were() {
     let fill = Paint::Gradient(Box::new(GradientPaint::new(Gradient::default())));
@@ -245,6 +289,21 @@ fn fonts_whose_licence_forbids_embedding_fall_back_to_outlines() {
     let mut paths = 0;
     back.walk(|n| paths += usize::from(matches!(n.kind, NodeKind::Path { .. } | NodeKind::Compound { .. })));
     assert!(paths >= 2, "{paths} outlined words");
+}
+
+#[test]
+fn type_with_outline_object_is_written_as_paths_with_no_font() {
+    let mut d = doc(vec![TextObject::point(Point::new(20.0, 60.0), "Hello World", style(24.0))]);
+    let id = d.layers[0].children().unwrap()[0].id;
+    d.node_mut(id).unwrap().appearance.effects.push(vectorcraft_doc::Effect { id: "path.outlineObject".into(), params: json!({}), visible: true });
+    let r = pdf(&d, false);
+    let text = String::from_utf8_lossy(&r.bytes);
+    assert!(!text.contains("/FontFile") && !text.contains("/Font"), "no font");
+    // Reopened, it is paths, even when type is asked for.
+    let back = import_as(&r.bytes, TextAs::Text);
+    assert!(texts(&back).is_empty());
+    let b = ink(&back);
+    assert!(b.width() > 50.0 && b.height() > 10.0, "{b:?}");
 }
 
 #[test]
@@ -423,4 +482,23 @@ fn glyphs_spaced_each_their_own_way_keep_their_place() {
             assert_eq!(t.runs.len(), 1, "{:?}", t.runs.iter().map(|r| r.style.tracking).collect::<Vec<_>>());
         }
     });
+}
+
+/// Evenly tracked type on a path comes back with its tracking: each glyph where it was along the
+/// curve, not closed up to the font's advances.
+#[test]
+fn evenly_tracked_type_on_a_path_keeps_its_length() {
+    let mut arc = BezPath::new();
+    arc.move_to((40.0, 200.0));
+    arc.curve_to((100.0, 80.0), (260.0, 80.0), (320.0, 200.0));
+    let mut t = TextObject::point(Point::ORIGIN, "ARCHING TYPE", CharStyle { tracking: 80.0, ..style(24.0) });
+    t.kind = TextKind::OnPath { path: PathData::from_bezpath(&arc), start: 0.0, end: None };
+    let d = doc(vec![t]);
+    let want = origins(&d);
+    let back = import_as(&pdf(&d, false).bytes, TextAs::default());
+    let got = origins(&back);
+    assert_eq!(got.len(), want.len(), "{:?}", texts(&back));
+    for (g, w) in got.iter().zip(&want) {
+        assert!(g.distance(*w) < 0.3, "{got:?}\nvs {want:?}");
+    }
 }

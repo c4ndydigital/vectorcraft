@@ -66,6 +66,8 @@ type CachedLayout = ((u64, TextObject), Arc<TextLayout>);
 pub struct TypeTool {
     vertical: bool,
     mode: Mode,
+    /// The tool to return to on Escape (e.g. when double-clicked from a selection tool).
+    prev_tool: Option<String>,
     /// Text object being edited.
     editing: Option<NodeId>,
     /// The point type a click just placed (edited now): discarded if empty when editing ends.
@@ -303,24 +305,87 @@ impl TypeTool {
     }
 
     fn overflow_marker(t: &TextObject, lay: &TextLayout, cx: &ToolContext, o: &mut Vec<Overlay>) {
-        if !lay.overflow {
-            return;
+        if lay.overflow {
+            overflow_port(t, cx, o);
         }
-        // The out port: bottom-right of the frame (end of the path for type on a path).
-        let port = match &t.kind {
-            TextKind::Area { frame } => frame.bounds().map(|b| t.xf * Point::new(b.x1, b.y1)),
-            TextKind::OnPath { path, .. } => path.to_bezpath().segments().last().map(|s| t.xf * vectorcraft_geom::ParamCurve::end(&s)),
-            TextKind::Point => None,
-        };
-        let Some(c) = port else { return };
-        let h = cx.tol(4.5);
-        let r = Rect::new(c.x - h, c.y - h, c.x + h, c.y + h);
-        let red = [230, 30, 30];
-        o.push(Overlay::Path { path: r.to_path(0.1), color: red, width: 1.0, dashed: false });
-        let (k, m) = (cx.tol(2.5), r.center());
-        o.push(Overlay::Line { a: Point::new(m.x - k, m.y), b: Point::new(m.x + k, m.y), color: red, dashed: false });
-        o.push(Overlay::Line { a: Point::new(m.x, m.y - k), b: Point::new(m.x, m.y + k), color: red, dashed: false });
     }
+}
+
+/// How far (screen px) the out port of area type sits above the bottom-right corner of its frame,
+/// on its right side: clear of the bounding box's corner handle, so both can be grabbed.
+pub const PORT_RISE_PX: f64 = 12.0;
+/// Half the out port's side (screen px).
+const PORT_HALF_PX: f64 = 4.5;
+
+/// Centre of the out port of `t`: on the right side of an area type frame just above its
+/// bottom-right corner ([`PORT_RISE_PX`]), at the end of the path for type on a path.
+fn out_port(t: &TextObject, cx: &ToolContext) -> Option<Point> {
+    match &t.kind {
+        TextKind::Area { frame } => {
+            let b = frame.bounds()?;
+            let corner = t.xf * Point::new(b.x1, b.y1);
+            let up = t.xf * Point::new(b.x1, b.y0) - corner;
+            let len = up.hypot();
+            Some(if len > 1e-9 && len.is_finite() { corner + up * (cx.tol(PORT_RISE_PX).min(len / 2.0) / len) } else { corner })
+        }
+        TextKind::OnPath { path, .. } => path.to_bezpath().segments().last().map(|s| t.xf * vectorcraft_geom::ParamCurve::end(&s)),
+        TextKind::Point => None,
+    }
+}
+
+/// The red "+" out port of `t` (area type and type on a path whose text doesn't fit), at [`out_port`].
+fn overflow_port(t: &TextObject, cx: &ToolContext, o: &mut Vec<Overlay>) {
+    let Some(c) = out_port(t, cx) else { return };
+    let h = cx.tol(PORT_HALF_PX);
+    let r = Rect::new(c.x - h, c.y - h, c.x + h, c.y + h);
+    let red = [230, 30, 30];
+    o.push(Overlay::Path { path: r.to_path(0.1), color: red, width: 1.0, dashed: false });
+    let (k, m) = (cx.tol(2.5), r.center());
+    o.push(Overlay::Line { a: Point::new(m.x - k, m.y), b: Point::new(m.x + k, m.y), color: red, dashed: false });
+    o.push(Overlay::Line { a: Point::new(m.x, m.y - k), b: Point::new(m.x, m.y + k), color: red, dashed: false });
+}
+
+/// The selected area type whose red out port is under `p` (only text that overflows shows one):
+/// a click there loads the Selection tool with its text, to thread into another frame.
+pub(crate) fn out_port_at(cx: &ToolContext, p: Point) -> Option<NodeId> {
+    let h = cx.tol(PORT_HALF_PX + 1.0);
+    let near = |t: &TextObject| out_port(t, cx).is_some_and(|c| (c.x - p.x).abs() <= h && (c.y - p.y).abs() <= h);
+    cx.selection.objects.iter().copied().find(|id| {
+        cx.doc
+            .node(*id)
+            .filter(|n| crate::select::is_area_type(n))
+            .and_then(|_| TypeTool::text(cx, *id))
+            .is_some_and(|t| near(t) && vectorcraft_text::layout(FontDb::global(), t).overflow)
+    })
+}
+
+/// Which selected text overflows, for [`overflow_markers`]: each text object's layout verdict kept
+/// with the object and the fonts it was made from, as overlays run every frame.
+#[derive(Default)]
+pub struct OverflowMarks {
+    seen: std::collections::HashMap<NodeId, ((u64, TextObject), bool)>,
+}
+
+/// The overflow markers of the selected area type and type on a path, for every tool but the Type
+/// tools (they draw their own): an out port with a red "+" tells that text is hidden by the size of
+/// its frame, whatever tool is active.
+pub fn overflow_markers(marks: &mut OverflowMarks, cx: &ToolContext) -> Vec<Overlay> {
+    let fonts = FontDb::global().generation();
+    let mut o = Vec::new();
+    let mut kept = std::collections::HashMap::new();
+    for id in &cx.selection.objects {
+        let Some(t) = TypeTool::text(cx, *id).filter(|t| !matches!(t.kind, TextKind::Point)) else { continue };
+        let over = match marks.seen.remove(id) {
+            Some(((g, was), over)) if g == fonts && &was == t => over,
+            _ => vectorcraft_text::layout(FontDb::global(), t).overflow,
+        };
+        if over {
+            overflow_port(t, cx, &mut o);
+        }
+        kept.insert(*id, ((fonts, t.clone()), over));
+    }
+    marks.seen = kept;
+    o
 }
 
 /// Byte range in `s` of the characters `r` (IME ranges count characters; carets count bytes).
@@ -380,6 +445,10 @@ impl Tool for TypeTool {
     }
     fn wants_text(&self) -> bool {
         self.editing.is_some()
+    }
+    /// Escape while editing is the tool's: it goes on to the Selection tool (#1686).
+    fn claims_key(&self, _: &ToolContext, key: ToolKey) -> bool {
+        key == ToolKey::Escape && self.editing.is_some()
     }
     fn pointer(&mut self, cx: &ToolContext, ev: &PointerEvent) -> Vec<Action> {
         match ev.kind {
@@ -522,7 +591,15 @@ impl Tool for TypeTool {
             self.goal_x = None;
         }
         match key {
-            ToolKey::Escape => self.finish(cx),
+            // Escape ends editing and goes back to the tool used before double-clicking into type
+            // (or to the Selection tool by default), the type selected: the keyboard is free for
+            // tool shortcuts again (#1686).
+            ToolKey::Escape => {
+                let target = self.prev_tool.take().unwrap_or_else(|| "selection".into());
+                let mut out = self.finish(cx);
+                out.push(Action::SwitchTool(target));
+                out
+            }
             ToolKey::Enter => self.replace(cx, "\n", None),
             ToolKey::Tab => self.replace(cx, "\t", None),
             ToolKey::Backspace | ToolKey::Delete if a != b => self.replace(cx, "", None),
@@ -654,6 +731,7 @@ impl Tool for TypeTool {
         Some((t.xf * a, t.xf * b))
     }
     fn deactivate(&mut self, cx: &ToolContext) -> Vec<Action> {
+        self.prev_tool = None;
         self.finish(cx)
     }
     /// Editing ends when a command takes the text out of the selection (Deselect, another object
@@ -688,15 +766,27 @@ impl Tool for TypeTool {
             Some(id) => {
                 // Offsets may exceed the text after Select All; callers clamp to the text length.
                 let (a, b) = self.sel();
-                json!({"editing": id.0, "start": a, "end": b, "caret": self.caret, "anchor": self.anchor, "typing": self.typing.is_some(), "composing": self.preedit.is_some()})
+                json!({
+                    "editing": id.0,
+                    "start": a,
+                    "end": b,
+                    "caret": self.caret,
+                    "anchor": self.anchor,
+                    "typing": self.typing.is_some(),
+                    "composing": self.preedit.is_some(),
+                    "prevTool": self.prev_tool,
+                })
             }
-            None => json!({"editing": null}),
+            None => json!({"editing": null, "prevTool": self.prev_tool}),
         }
     }
     /// `select {start, end}` / `selectAll` / `copy` (with `runs` of the selection) /
     /// `commitTyping` (the caller commits the engine interaction).
     fn set_option(&mut self, key: &str, v: &Value) {
         match key {
+            "prevTool" | "previousTool" => {
+                self.prev_tool = v.as_str().map(String::from);
+            }
             "commitTyping" | "endTyping" => {
                 self.typing = None;
                 self.preedit = None;
@@ -721,6 +811,7 @@ impl Tool for TypeTool {
                 self.typing = None;
                 self.preedit = None;
                 self.editing = None;
+                self.prev_tool = None;
             }
             _ => {}
         }
@@ -786,7 +877,7 @@ impl Tool for TypeTool {
         if self.mode != Mode::Type && Self::path_at(cx, p, self.mode == Mode::Area).is_some() {
             return Cursor::Crosshair;
         }
-        Cursor::Text
+        if self.vertical { Cursor::TypeVertical } else { Cursor::Text }
     }
 }
 

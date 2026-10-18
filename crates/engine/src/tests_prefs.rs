@@ -240,6 +240,20 @@ fn linux_display_server_defaults_to_automatic_and_validates() {
     assert_eq!(s.prefs.linux_display_server, "automatic");
 }
 
+/// Linux Display Server's pen choice (#2028): set by value or by label, saved, and off by default.
+#[test]
+fn linux_display_server_has_a_choice_for_an_attached_pen() {
+    let mut s = Session::new();
+    s.execute("prefs.set", &json!({"key": "linuxDisplayServer", "value": "x11WithPen"})).unwrap();
+    assert_eq!(s.prefs.linux_display_server, "x11WithPen");
+    assert_eq!(s.prefs.to_json()["linuxDisplayServer"], "x11WithPen");
+    s.execute("prefs.set", &json!({"key": "linuxDisplayServer", "value": "automatic"})).unwrap();
+    s.execute("prefs.set", &json!({"key": "linuxDisplayServer", "value": "X11 (XWayland) When a Pen Is Attached"})).unwrap();
+    assert_eq!(s.prefs.linux_display_server, "x11WithPen");
+    s.execute("prefs.reset", &json!({"category": "Performance"})).unwrap();
+    assert_eq!(s.prefs.linux_display_server, "automatic");
+}
+
 /// Selection & Anchor Display › Tolerance, Object Selection by Path Only and Command Click to
 /// Select Objects Behind, and General › Double Click To Isolate, as the Selection tool sees them
 /// (#394).
@@ -371,6 +385,137 @@ fn use_precise_cursors_makes_drawing_cursors_crosshairs() {
     assert_eq!(cursor(&mut s, "selection"), Cursor::Arrow);
     s.execute("prefs.set", &json!({"key": "usePreciseCursors", "value": false})).unwrap();
     assert_eq!(cursor(&mut s, "eyedropper"), Cursor::Eyedropper);
+}
+
+/// Use Precise Cursors changes the pointer of the tools that have one of their own: off, each shows its own
+/// pointer; on, a crosshair. Every other drawing tool shows a crosshair either way, and the Type tool and the
+/// Scissors over no path keep theirs.
+#[test]
+fn use_precise_cursors_swaps_the_tools_own_pointers_for_a_crosshair() {
+    use vectorcraft_tools::{Cursor, Mods};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 400, "height": 400})).unwrap();
+    let at = vectorcraft_geom::Point::new(300.0, 300.0);
+    let cursor = |s: &mut Session, tool: &str| {
+        s.select_tool(tool, ViewInfo::default()).unwrap();
+        s.cursor(at, Mods::default(), ViewInfo::default())
+    };
+    // Off: the pointer of each tool whose own pointer the preference replaces.
+    let own = [
+        ("pen", Cursor::Pen),
+        ("addAnchor", Cursor::PenAdd),
+        ("deleteAnchor", Cursor::PenDelete),
+        ("anchorPoint", Cursor::AnchorPoint),
+        ("curvature", Cursor::Curvature),
+        ("mesh", Cursor::MeshAdd),
+        ("eyedropper", Cursor::Eyedropper),
+        ("slice", Cursor::Slice),
+        ("blend", Cursor::Blend),
+        ("shapeBuilder", Cursor::ShapeBuilder),
+        ("paintbrush", Cursor::Paintbrush),
+        ("blobBrush", Cursor::BlobBrush),
+        ("shaper", Cursor::Shaper),
+        ("pencil", Cursor::Pencil),
+        ("smooth", Cursor::Smooth),
+        ("pathEraser", Cursor::PathEraser),
+        ("join", Cursor::Join),
+        ("eraser", Cursor::Eraser),
+        ("knife", Cursor::Knife),
+    ];
+    for (tool, c) in own {
+        assert_eq!(cursor(&mut s, tool), c, "{tool} off");
+    }
+    // The tools that show a crosshair whatever the preference says.
+    let always = [
+        "lineSegment",
+        "arc",
+        "spiral",
+        "rectangularGrid",
+        "polarGrid",
+        "rectangle",
+        "roundedRectangle",
+        "ellipse",
+        "polygon",
+        "star",
+        "flare",
+        "mirrorCut",
+        "lineCut",
+        "rectCut",
+        "gradient",
+    ];
+    for tool in always {
+        assert_eq!(cursor(&mut s, tool), Cursor::Crosshair, "{tool} off");
+    }
+    s.execute("prefs.set", &json!({"key": "usePreciseCursors", "value": true})).unwrap();
+    for (tool, _) in own {
+        assert_eq!(cursor(&mut s, tool), Cursor::Crosshair, "{tool} on");
+    }
+    for tool in always {
+        assert_eq!(cursor(&mut s, tool), Cursor::Crosshair, "{tool} on");
+    }
+    assert_eq!(cursor(&mut s, "type"), Cursor::Text);
+    assert_eq!(cursor(&mut s, "scissors"), Cursor::ScissorsNotAllowed);
+    s.execute("prefs.set", &json!({"key": "usePreciseCursors", "value": false})).unwrap();
+    for (tool, c) in own {
+        assert_eq!(cursor(&mut s, tool), c, "{tool} off again");
+    }
+}
+
+/// Every state of the Pen's pointer, and the other drawing pointers, turn into a crosshair; the rest stay.
+#[test]
+fn precise_cursors_replace_every_pen_state() {
+    use vectorcraft_tools::Cursor;
+    for c in [
+        Cursor::Pen,
+        Cursor::PenDrawing,
+        Cursor::PenAdd,
+        Cursor::PenDelete,
+        Cursor::PenClose,
+        Cursor::PenContinue,
+        Cursor::PenJoin,
+        Cursor::PenConvert,
+        Cursor::Eyedropper,
+        Cursor::Slice,
+        Cursor::Blend,
+        Cursor::BlendObject,
+        Cursor::BlendAnchor,
+        Cursor::ShapeBuilder,
+        Cursor::ShapeBuilderErase,
+        Cursor::AnchorPoint,
+        Cursor::Curvature,
+    ] {
+        assert_eq!(c.precise(), Cursor::Crosshair, "{c:?}");
+    }
+    for c in [Cursor::Arrow, Cursor::Move, Cursor::Text, Cursor::Hand, Cursor::NotAllowed, Cursor::SliceSelect] {
+        assert_eq!(c.precise(), c, "{c:?}");
+    }
+}
+
+/// Switching the preference is not an edit: no undo step, no unsaved changes.
+#[test]
+fn use_precise_cursors_is_not_an_edit() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 400, "height": 400})).unwrap();
+    let before = (s.active().unwrap().history.undo.len(), s.active().unwrap().history.redo.len());
+    assert!(!s.active().unwrap().is_dirty());
+    s.execute("prefs.set", &json!({"key": "usePreciseCursors", "value": true})).unwrap();
+    assert!(s.prefs.use_precise_cursors);
+    let st = s.active().unwrap();
+    assert_eq!((st.history.undo.len(), st.history.redo.len()), before, "no undo step");
+    assert!(!st.is_dirty(), "the document stays saved");
+}
+
+/// The preference is saved with the others and reads back as it was.
+#[test]
+fn use_precise_cursors_is_saved_and_restored() {
+    let mut s = Session::new();
+    assert!(!s.prefs.use_precise_cursors, "off by default");
+    s.execute("prefs.set", &json!({"key": "usePreciseCursors", "value": true})).unwrap();
+    let saved = s.prefs.to_json();
+    assert_eq!(saved["usePreciseCursors"], json!(true));
+    let mut t = Session::new();
+    t.apply_prefs(serde_json::from_value(saved).unwrap());
+    assert!(t.prefs.use_precise_cursors);
 }
 
 // ---------- #394, second batch ----------
@@ -890,6 +1035,125 @@ fn type_increments_step_the_type() {
     // The font size shortcut steps the selected text while the tool edits.
     s.execute("type.size.increase", &json!({})).unwrap();
     assert_eq!((style_at(&s, id, 0).size, style_at(&s, id, 6).size), (19.0, 22.0));
+    // The type objects given in `ids` step in full while the tool edits.
+    s.execute("type.step", &json!({"attribute": "size", "ids": [id.0]})).unwrap();
+    assert_eq!((style_at(&s, id, 0).size, style_at(&s, id, 6).size), (22.0, 25.0));
+}
+
+/// Cmd/Ctrl+Alt+Shift+. and , step the font size by five times the Size/Leading increment, on
+/// the selected type objects and on the Type tool's selected text.
+#[test]
+fn font_size_steps_by_five_increments() {
+    use vectorcraft_tools::PointerKind::{Down, Up};
+    let mut s = new_doc();
+    let id = NodeId(s.execute("text.create", &json!({"x": 100, "y": 100, "text": "Hello world", "size": 12})).unwrap()["id"].as_u64().unwrap());
+    s.execute("select.set", &json!({"ids": [id.0]})).unwrap();
+    assert_eq!(find_command("type.size.increaseByFive").unwrap().shortcut, Some("Cmd+Alt+Shift+."));
+    assert_eq!(find_command("type.size.decreaseByFive").unwrap().shortcut, Some("Cmd+Alt+Shift+,"));
+    s.execute("type.size.increaseByFive", &json!({})).unwrap();
+    assert_eq!(style_at(&s, id, 0).size, 22.0, "five steps of the 2 pt Size/Leading increment");
+    s.execute("type.size.decreaseByFive", &json!({})).unwrap();
+    assert_eq!(style_at(&s, id, 0).size, 12.0);
+    set_pref(&mut s, "typeSizeIncrement", json!(3));
+    s.execute("type.size.increaseByFive", &json!({})).unwrap();
+    assert_eq!(style_at(&s, id, 10).size, 27.0, "the step follows the preference");
+    // While the Type tool edits, only its selected text steps.
+    let v = ViewInfo::default();
+    s.select_tool("type", v).unwrap();
+    gesture(&mut s, v, &[(Down, 102.0, 95.0), (Up, 102.0, 95.0)]);
+    assert_eq!(s.tool_options()["editing"], json!(id.0), "editing the text");
+    s.set_tool_option("select", &json!({"start": 6, "end": 11}));
+    s.execute("type.size.decreaseByFive", &json!({})).unwrap();
+    assert_eq!((style_at(&s, id, 0).size, style_at(&s, id, 6).size), (27.0, 12.0));
+}
+
+/// Cmd/Ctrl+Alt+Q resets tracking to 0 and kerning to Auto (0 in the Character panel) in every
+/// selected type object and in the Type tool's selected text. At a caret it resets only the
+/// kerning of the character before it. It is one undo step. Type objects given in `ids` are reset
+/// in full while the Type tool edits, and the typing in progress ends first.
+#[test]
+fn reset_tracking_sets_tracking_and_kerning_to_zero() {
+    use vectorcraft_tools::PointerKind::{Down, Up};
+    let mut s = new_doc();
+    let id = NodeId(s.execute("text.create", &json!({"x": 100, "y": 100, "text": "Hello world", "size": 20})).unwrap()["id"].as_u64().unwrap());
+    let spaced = |s: &mut Session| s.execute("text.setRangeStyle", &json!({"id": id.0, "tracking": 200, "kerning": -40})).unwrap();
+    let spacing = |s: &Session, byte| {
+        let st = style_at(s, id, byte);
+        (st.tracking, st.kerning)
+    };
+    spaced(&mut s);
+    let other = NodeId(s.execute("text.create", &json!({"x": 100, "y": 300, "text": "Other", "size": 20})).unwrap()["id"].as_u64().unwrap());
+    s.execute("text.setRangeStyle", &json!({"id": other.0, "tracking": 200})).unwrap();
+    s.execute("select.set", &json!({"ids": [id.0]})).unwrap();
+    assert_eq!(find_command("type.resetTracking").unwrap().shortcut, Some("Cmd+Alt+Q"));
+    assert_eq!(s.execute("type.resetTracking", &json!({})).unwrap()["ids"], json!([id.0]));
+    assert_eq!((spacing(&s, 0), spacing(&s, 10)), ((0.0, None), (0.0, None)));
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(spacing(&s, 0), (200.0, Some(-40.0)), "one undo step");
+    // With the Type tool, it resets only the selected text.
+    let v = ViewInfo::default();
+    s.select_tool("type", v).unwrap();
+    gesture(&mut s, v, &[(Down, 102.0, 95.0), (Up, 102.0, 95.0)]);
+    assert_eq!(s.tool_options()["editing"], json!(id.0), "editing the text");
+    s.set_tool_option("select", &json!({"start": 0, "end": 5}));
+    s.execute("type.resetTracking", &json!({})).unwrap();
+    assert_eq!((spacing(&s, 4), spacing(&s, 6)), ((0.0, None), (200.0, Some(-40.0))));
+    // At a caret it resets only the kerning of the character before it, and the tracking does not change.
+    s.set_tool_option("select", &json!({"start": 8, "end": 8}));
+    s.execute("type.resetTracking", &json!({})).unwrap();
+    assert_eq!((spacing(&s, 6), spacing(&s, 7), spacing(&s, 8)), ((200.0, Some(-40.0)), (200.0, None), (200.0, Some(-40.0))));
+    // While the Type tool edits, the type objects in `ids` are reset in full.
+    s.execute("type.resetTracking", &json!({"ids": [id.0]})).unwrap();
+    assert_eq!((spacing(&s, 6), spacing(&s, 10)), ((0.0, None), (0.0, None)));
+    // Typing in progress ends first, so the reset of another object stays when typing goes on.
+    s.tool_text("!", v).unwrap();
+    s.execute("type.resetTracking", &json!({"ids": [other.0]})).unwrap();
+    s.tool_text("?", v).unwrap();
+    assert_eq!(style_at(&s, other, 0).tracking, 0.0, "the reset stays");
+}
+
+/// Cmd/Ctrl+Shift+X resets the horizontal scale to 100% in every selected type object and in the
+/// Type tool's selected text, as one undo step, and leaves the vertical scale as it is. At a caret
+/// it leaves the text as it is. On a stretched object the scale the Character panel shows, which includes the
+/// object's own stretch, goes to 100%. Type objects given in `ids` are reset in full while the
+/// Type tool edits.
+#[test]
+fn reset_horizontal_scale_sets_it_to_100_percent() {
+    use vectorcraft_tools::PointerKind::{Down, Up};
+    let mut s = new_doc();
+    let id = NodeId(s.execute("text.create", &json!({"x": 100, "y": 100, "text": "Hello world", "size": 20})).unwrap()["id"].as_u64().unwrap());
+    let scales = |s: &Session, byte| {
+        let st = style_at(s, id, byte);
+        (st.h_scale, st.v_scale)
+    };
+    s.execute("text.setRangeStyle", &json!({"id": id.0, "hScale": 150, "vScale": 80})).unwrap();
+    s.execute("select.set", &json!({"ids": [id.0]})).unwrap();
+    assert_eq!(find_command("type.resetHorizontalScale").unwrap().shortcut, Some("Cmd+Shift+X"));
+    assert_eq!(s.execute("type.resetHorizontalScale", &json!({})).unwrap()["ids"], json!([id.0]));
+    assert_eq!((scales(&s, 0), scales(&s, 10)), ((100.0, 80.0), (100.0, 80.0)));
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(scales(&s, 0), (150.0, 80.0), "one undo step");
+    // A type object stretched to twice its width shows 200% and keeps half of it stored.
+    let wide = NodeId(s.execute("text.create", &json!({"x": 100, "y": 300, "text": "Wide", "size": 20})).unwrap()["id"].as_u64().unwrap());
+    s.execute("select.set", &json!({"ids": [wide.0]})).unwrap();
+    s.execute("object.scale", &json!({"sx": 200, "sy": 100})).unwrap();
+    s.execute("type.resetHorizontalScale", &json!({})).unwrap();
+    assert_eq!(style_at(&s, wide, 0).h_scale, 50.0);
+    // With the Type tool, it resets only the selected text.
+    let v = ViewInfo::default();
+    s.select_tool("type", v).unwrap();
+    gesture(&mut s, v, &[(Down, 102.0, 95.0), (Up, 102.0, 95.0)]);
+    assert_eq!(s.tool_options()["editing"], json!(id.0), "editing the text");
+    s.set_tool_option("select", &json!({"start": 0, "end": 5}));
+    s.execute("type.resetHorizontalScale", &json!({})).unwrap();
+    assert_eq!((scales(&s, 4), scales(&s, 6)), ((100.0, 80.0), (150.0, 80.0)));
+    // At a caret it leaves the text as it is.
+    s.set_tool_option("select", &json!({"start": 8, "end": 8}));
+    assert_eq!(s.execute("type.resetHorizontalScale", &json!({})).unwrap()["ids"], json!([]));
+    assert_eq!((scales(&s, 7), scales(&s, 8)), ((150.0, 80.0), (150.0, 80.0)));
+    // While the Type tool edits, the type objects in `ids` are reset in full.
+    s.execute("type.resetHorizontalScale", &json!({"ids": [id.0]})).unwrap();
+    assert_eq!((scales(&s, 6), scales(&s, 10)), ((100.0, 80.0), (100.0, 80.0)));
 }
 
 /// Type › Fill New Type Objects With Placeholder Text (#394, on by default): type the Type tool
@@ -944,6 +1208,55 @@ fn missing_glyph_protection_keeps_glyphs_a_new_font_lacks() {
     set_pref(&mut s, "missingGlyphProtection", json!(false));
     s.execute("text.setStyle", &json!({"font": to})).unwrap();
     assert_eq!(fonts(&s), [to, to, to]);
+}
+
+/// A character that keeps its font through Missing Glyph Protection keeps that font's Variable
+/// Font settings too; the characters that take the new font lose them.
+#[test]
+fn missing_glyph_protection_keeps_the_variable_font_settings_of_the_font_kept() {
+    use vectorcraft_text::test_fonts::{TWO_AXIS_FAMILY as FROM, two_axis_font};
+    let (to, c) = ("JetBrains Mono", '\u{180}');
+    let db = vectorcraft_text::FontDb::global();
+    db.add_font(two_axis_font().unwrap());
+    if !db.face(FROM, "Regular").is_some_and(|f| f.covers(c)) || db.face(to, "Regular").is_some_and(|f| f.covers(c)) {
+        return; // An installed font of that name covers the character.
+    }
+    let mut s = new_doc();
+    let id = NodeId(s.execute("text.create", &json!({"x": 10, "y": 50, "text": "a\u{180}c", "font": FROM})).unwrap()["id"].as_u64().unwrap());
+    s.execute("select.set", &json!({"ids": [id.0]})).unwrap();
+    s.execute("text.setFormat", &json!({"fontAxes": {"wght": 650}})).unwrap();
+    let fonts = |s: &Session| [0, 1, 3].map(|b| style_at(s, id, b)).map(|st| (st.font_family, st.font_axes.get("wght").copied()));
+    let (kept, moved) = ((FROM.to_string(), Some(650.0)), (to.to_string(), None));
+    for change in [json!({"font": to}), json!({"id": id.0, "start": 0, "end": 4, "font": to})] {
+        let cmd = if change.get("id").is_some() { "text.setRangeStyle" } else { "text.setStyle" };
+        s.execute(cmd, &change).unwrap();
+        assert_eq!(fonts(&s), [moved.clone(), kept.clone(), moved.clone()], "{cmd}");
+        s.execute("edit.undo", &json!({})).unwrap();
+    }
+}
+
+/// A character that keeps its font through Missing Glyph Protection keeps the version of it the
+/// type names.
+#[test]
+fn missing_glyph_protection_keeps_the_version_of_the_font_kept() {
+    use vectorcraft_text::test_fonts::{TWIN_FAMILY as FROM, TWIN_VERSIONS, twin_font};
+    let (to, c) = ("JetBrains Mono", '\u{180}');
+    let db = vectorcraft_text::FontDb::global();
+    db.add_font(twin_font(false).unwrap());
+    let older = db.face_version(FROM, "Regular", Some(TWIN_VERSIONS[0]));
+    if !older.is_some_and(|f| f.version == TWIN_VERSIONS[0] && f.covers(c)) || db.face(to, "Regular").is_some_and(|f| f.covers(c)) {
+        return; // An installed font of that name covers the character.
+    }
+    let mut s = new_doc();
+    let id = NodeId(s.execute("text.create", &json!({"x": 10, "y": 50, "text": "a\u{180}c", "font": FROM})).unwrap()["id"].as_u64().unwrap());
+    if let Some(NodeKind::Text(t)) = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc).node_mut(id).map(|n| &mut n.kind) {
+        t.runs[0].style.font_version = Some(TWIN_VERSIONS[0].into());
+    }
+    s.execute("select.set", &json!({"ids": [id.0]})).unwrap();
+    s.execute("text.setStyle", &json!({"font": to})).unwrap();
+    let versions = [0, 1, 3].map(|b| (style_at(&s, id, b).font_family, style_at(&s, id, b).font_version));
+    let (kept, moved) = ((FROM.to_string(), Some(TWIN_VERSIONS[0].to_string())), (to.to_string(), None));
+    assert_eq!(versions, [moved.clone(), kept, moved]);
 }
 
 // ---------- #394, fourth batch ----------
@@ -1034,6 +1347,18 @@ fn show_font_names_in_english_preference_is_stored() {
     assert!(!s.prefs.font_names_in_english);
     set_pref(&mut s, "fontNamesInEnglish", json!(true));
     assert!(s.prefs.font_names_in_english);
+}
+
+/// Preferences › Type › Highlight Alternate Glyphs (#394): off by default so OpenType
+/// substitutions are not pink on every canvas until the user turns the preference on.
+#[test]
+fn highlight_alternate_glyphs_preference_is_off_by_default() {
+    let mut s = Session::new();
+    assert!(!s.prefs.highlight_alternate_glyphs, "off by default");
+    set_pref(&mut s, "highlightAlternateGlyphs", json!(true));
+    assert!(s.prefs.highlight_alternate_glyphs);
+    set_pref(&mut s, "highlightAlternateGlyphs", json!(false));
+    assert!(!s.prefs.highlight_alternate_glyphs);
 }
 
 /// Preferences › Hyphenation › Exceptions (#394): `prefs.set` pushes the list into the hyphenator

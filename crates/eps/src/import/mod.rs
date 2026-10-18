@@ -18,16 +18,19 @@
 //! `%%Creator`) and these operators: Adobe Illustrator File Format Specification, version 7.0
 //! (1998), listed by PRONOM at https://www.nationalarchives.gov.uk/PRONOM/fmt/423. A file in that
 //! format whose program has its layers (`%AI5_BeginLayer`) comes in through them, as `native` reads
-//! an Illustrator EPS's editing copy (#1027).
+//! an Illustrator EPS's editing copy (#1027). One VectorCraft wrote (its prolog the procedure set
+//! [`crate::legacy_ai::PROCSET`], which prints its gradients flat and leaves its type out) comes in
+//! from those layers alone, without its page.
 //!
 //! The page is the file's `%%BoundingBox` (`%%HiResBoundingBox` when it has one), the first page
 //! of a PostScript file without one. A file whose program can't be read (an operator the
 //! interpreter doesn't know, an error, a limit reached) or that draws nothing comes in from its
 //! layers when its program has them (a `.ai` in PostScript form whose prolog is named but not
-//! included, as other apps write it), else as its preview (a TIFF image, a Windows metafile or an
-//! EPSI bitmap), with a warning that names the error, the operator and the procedures it ran in;
-//! without a preview, what was drawn before the error is kept (with that warning), else the file
-//! is refused.
+//! included, as other apps write it), or with its art on one layer when it is in the legacy format
+//! without layers (Illustrator 3, as image editors still export their paths), else as its preview
+//! (a TIFF image, a Windows metafile or an EPSI bitmap), with a warning that names the error, the
+//! operator and the procedures it ran in; without a preview, what was drawn before the error is
+//! kept (with that warning), else the file is refused.
 
 mod ai;
 mod ate;
@@ -92,6 +95,9 @@ struct Dsc {
     /// In the legacy Illustrator format: its header has `%AI…` comments or names the app as the
     /// creator (see the module docs for the specification).
     illustrator: bool,
+    /// Its prolog is the one VectorCraft's legacy `.ai` writer includes
+    /// ([`crate::legacy_ai::PROCSET`] in `%%DocumentSuppliedResources`).
+    own_legacy: bool,
 }
 
 /// The four numbers of a bounding box comment's value, when it has them and they make a box.
@@ -125,6 +131,9 @@ impl Dsc {
             let creator = value("%%Creator:").is_some_and(|v| v.contains("Illustrator")); // brand-ok: the creator its files name
             if header && (line.starts_with("%AI") || line.starts_with("%%AI") || creator) {
                 d.illustrator = true;
+            }
+            if header && value("%%DocumentSuppliedResources:").is_some_and(|v| v.strip_prefix("procset ") == Some(crate::legacy_ai::PROCSET)) {
+                d.own_legacy = true;
             }
             if let Some(v) = value("%%HiResBoundingBox:") {
                 if header || atend {
@@ -185,6 +194,15 @@ pub fn import_with(bytes: &[u8], editing_data: bool) -> Result<Imported, String>
         return Err("this is not a PostScript file".into());
     }
     let dsc = Dsc::read(ps);
+    // A legacy `.ai` VectorCraft wrote: its prolog prints the art plainly (gradients flat, no
+    // type), and its program has all of it, which is read as the format (as before the file
+    // printed).
+    if editing_data
+        && dsc.own_legacy
+        && let Some(Ok((document, warnings))) = native::program_alone(ps, dsc.illustrator)
+    {
+        return Ok(Imported { document, warnings, preview: false });
+    }
     let [llx, lly, urx, ury] = dsc.bbox.unwrap_or(LETTER);
     let frame = Rect::new(0.0, 0.0, urx - llx, ury - lly);
     let mut doc = Document::new(frame.width(), frame.height());
@@ -207,8 +225,9 @@ pub fn import_with(bytes: &[u8], editing_data: bool) -> Result<Imported, String>
         (Err(e), _) => reason(e, fault.as_ref()),
     };
     // A file in the legacy Illustrator format whose program can't be run (a `.ai` that names the
-    // prolog defining its operators without including it): its layers, which the program has.
-    let why = match editing_data.then(|| native::program_alone(ps)).flatten() {
+    // prolog defining its operators without including it): its layers, which the program has, or
+    // its art on one layer when it has none (Illustrator 3).
+    let why = match editing_data.then(|| native::program_alone(ps, dsc.illustrator)).flatten() {
         Some(Ok((document, warnings))) => return Ok(Imported { document, warnings, preview: false }),
         Some(Err(e)) => format!("{why}; its layers couldn't be read either ({e})"),
         None => why,
@@ -268,5 +287,7 @@ fn finish_with(out: Out, layers: Vec<Arc<Node>>) -> Imported {
         }
     }
     doc.layers = layers;
-    Imported { document: doc, warnings: out.warnings, preview: false }
+    let mut warnings = out.warnings;
+    doc.limit_depth_noting(&mut warnings);
+    Imported { document: doc, warnings, preview: false }
 }

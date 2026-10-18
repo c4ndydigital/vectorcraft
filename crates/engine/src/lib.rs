@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cmd;
+pub mod collab;
 pub mod file_access;
 pub mod guard;
 pub mod inspect;
@@ -1403,6 +1404,9 @@ impl Session {
 
     pub fn documents(&self) -> &[DocState] {
         &self.docs
+    }
+    pub fn documents_mut(&mut self) -> &mut [DocState] {
+        &mut self.docs
     }
     /// The open document with [`DocState::uid`] `uid` (it may have closed since it was looked up).
     pub fn document_mut(&mut self, uid: u64) -> Option<&mut DocState> {

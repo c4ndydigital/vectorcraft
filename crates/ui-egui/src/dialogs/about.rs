@@ -83,13 +83,22 @@ fn about_tab(app: &mut VectorcraftApp, ui: &mut egui::Ui) {
         )
         .size(12.0),
     );
-    ui.add_space(10.0);
+    ui.add_space(8.0);
     ui.horizontal(|ui| {
         let t = theme::Tokens::get(ui.ctx());
         icons::icon(ui, "git-branch", 16.0, t.icon);
-        let r = ui.add(egui::Button::new(egui::RichText::new("C4NDY Digital auf GitHub").color(t.accent).size(12.5)).frame(false));
-        if r.clicked() {
-            app.open_link("help.github");
+        let r_c4ndy = ui.add(egui::Button::new(egui::RichText::new("C4NDY Digital Fork auf GitHub").color(t.accent).size(12.5)).frame(false));
+        if r_c4ndy.clicked() {
+            app.open_url("https://github.com/c4ndydigital/vectorcraft");
+        }
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let t = theme::Tokens::get(ui.ctx());
+        icons::icon(ui, "git-branch", 14.0, t.text_dim);
+        let r_orig = ui.add(egui::Button::new(egui::RichText::new("Original VectorCraft (Upstream)").color(t.text_dim).size(11.5)).frame(false));
+        if r_orig.clicked() {
+            app.open_url("https://github.com/storytold/vectorcraft");
         }
     });
     ui.add_space(8.0);

@@ -36,6 +36,8 @@ pub enum CollabIncoming {
     Update(Vec<u8>),
     Presence(PeerPresence),
     Blob { key: String, mime: String, bytes: Vec<u8> },
+    AuthRequired,
+    Connected,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +45,7 @@ pub enum CollabOutgoing {
     Update(Vec<u8>),
     Presence(PeerPresence),
     Blob { key: String, mime: String, bytes: Vec<u8> },
+    ReconnectWithPin(String),
 }
 
 /// Prioritizes outgoing collaboration packets to eliminate Head-of-Line blocking:
@@ -59,6 +62,7 @@ pub fn prioritize_and_coalesce_outbox(queue: &mut Vec<CollabOutgoing>) -> Vec<Co
     let mut presence_order: Vec<u64> = Vec::new();
     let mut updates = Vec::new();
     let mut blobs = Vec::new();
+    let mut reconnects = Vec::new();
 
     for item in items {
         match item {
@@ -71,10 +75,12 @@ pub fn prioritize_and_coalesce_outbox(queue: &mut Vec<CollabOutgoing>) -> Vec<Co
             }
             CollabOutgoing::Update(u) => updates.push(CollabOutgoing::Update(u)),
             CollabOutgoing::Blob { key, mime, bytes } => blobs.push(CollabOutgoing::Blob { key, mime, bytes }),
+            CollabOutgoing::ReconnectWithPin(pin) => reconnects.push(CollabOutgoing::ReconnectWithPin(pin)),
         }
     }
 
-    let mut prioritized = Vec::with_capacity(presence_order.len() + updates.len() + blobs.len());
+    let mut prioritized = Vec::with_capacity(reconnects.len() + presence_order.len() + updates.len() + blobs.len());
+    prioritized.extend(reconnects);
     for id in presence_order {
         if let Some(p) = latest_presences.remove(&id) {
             prioritized.push(CollabOutgoing::Presence(p));
@@ -103,23 +109,26 @@ impl VectorcraftApp {
     pub fn set_collab_password(&mut self, pin: Option<String>) {
         if let Some(pin_val) = pin {
             self.collab_room_protected = true;
+            self.collab_auth_required = false;
             // Update collab_share_url with &pin=...
             let base = self.collab_share_url.split('&').filter(|p| !p.starts_with("pin=")).collect::<Vec<_>>().join("&");
             self.collab_share_url = format!("{base}&pin={pin_val}");
-            // Send auth update through collab outbox if present
+            // Send auth update (and reconnect if socket was closed due to missing PIN) through collab outbox
             if let Some(outbox) = &self.services.collab_outbox {
-                let msg = CollabOutgoing::Blob {
+                let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
+                g.push(CollabOutgoing::ReconnectWithPin(pin_val.clone()));
+                g.push(CollabOutgoing::Blob {
                     key: "__room_auth__".to_string(),
                     mime: "application/json".to_string(),
                     bytes: serde_json::to_vec(&serde_json::json!({
                         "type": "set_room_pin",
                         "pin": pin_val,
                     })).unwrap_or_default(),
-                };
-                outbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+                });
             }
         } else {
             self.collab_room_protected = false;
+            self.collab_auth_required = false;
             // Remove pin=... from share URL
             self.collab_share_url = self.collab_share_url.split('&').filter(|p| !p.starts_with("pin=")).collect::<Vec<_>>().join("&");
             if let Some(outbox) = &self.services.collab_outbox {
@@ -218,8 +227,40 @@ impl VectorcraftApp {
                         ctx.request_repaint();
                     }
                 }
+                CollabIncoming::AuthRequired => {
+                    self.collab_room_protected = true;
+                    self.collab_auth_required = true;
+                    self.ui.room_password = true;
+                    ctx.request_repaint();
+                }
+                CollabIncoming::Connected => {
+                    self.collab_auth_required = false;
+                    // Push current local document state so any edits made before connecting/reconnecting are synced
+                    self.collab_drag_dirty = true;
+                    ctx.request_repaint();
+                }
                 CollabIncoming::Blob { key, mime, bytes } => {
-                    if active_drag {
+                    if key == "__room_auth__" {
+                        if let Ok(auth_msg) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                            match auth_msg.get("type").and_then(|t| t.as_str()) {
+                                Some("room_auth_status") => {
+                                    if let Some(prot) = auth_msg.get("protected").and_then(|p| p.as_bool()) {
+                                        self.collab_room_protected = prot;
+                                        ctx.request_repaint();
+                                    }
+                                }
+                                Some("set_room_pin") => {
+                                    self.collab_room_protected = true;
+                                    ctx.request_repaint();
+                                }
+                                Some("clear_room_pin") => {
+                                    self.collab_room_protected = false;
+                                    ctx.request_repaint();
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else if active_drag {
                         deferred_incoming.push(CollabIncoming::Blob { key, mime, bytes });
                     } else {
                         // Store the blob into all local documents that reference it or the active document

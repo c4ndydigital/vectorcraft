@@ -526,6 +526,8 @@ pub struct VectorcraftApp {
     pub collab_room_id: String,
     /// Whether the current collaboration room is password/PIN protected.
     pub collab_room_protected: bool,
+    /// True if the server rejected our WebSocket connection because a PIN is required (or wrong PIN was entered).
+    pub collab_auth_required: bool,
     /// Password / PIN entered by user in the room password modal.
     pub collab_password_input: String,
     /// The folders control requests, and the input they inject, may read and write
@@ -644,6 +646,7 @@ impl VectorcraftApp {
             collab_share_url: "/?room=c4ndy-studio".to_string(),
             collab_room_id: "c4ndy-studio".to_string(),
             collab_room_protected: false,
+            collab_auth_required: false,
             collab_password_input: String::new(),
             automation_roots: None,
             synthetic_frame: false,

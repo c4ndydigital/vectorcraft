@@ -513,6 +513,7 @@ async fn ws_handler(ws: WebSocketUpgrade, Query(query): Query<WsQuery>, State(st
 
     // Room password / PIN authentication
     let provided_pin = query.pin.or(query.password);
+    let mut auth_rejected = false;
     {
         let room_pin = room.pin.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(expected) = room_pin {
@@ -520,7 +521,7 @@ async fn ws_handler(ws: WebSocketUpgrade, Query(query): Query<WsQuery>, State(st
                 Some(ref p) if p == &expected => {}
                 _ => {
                     eprintln!("[server] unauthorized ws connection attempt to room '{room_id}' (invalid/missing pin)");
-                    return Err(StatusCode::UNAUTHORIZED);
+                    auth_rejected = true;
                 }
             }
         } else if let Some(initial_pin) = provided_pin {
@@ -531,6 +532,19 @@ async fn ws_handler(ws: WebSocketUpgrade, Query(query): Query<WsQuery>, State(st
                 eprintln!("[server] room '{room_id}' initialized with password protection");
             }
         }
+    }
+
+    if auth_rejected {
+        // Complete the WebSocket upgrade and close with custom code 4001 ("PIN_REQUIRED")
+        // instead of HTTP 401 so browsers don't show "HTTP Authentication failed" and WASM can open the PIN modal!
+        return Ok(ws.on_upgrade(|mut socket| async move {
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 4001,
+                    reason: "PIN_REQUIRED".into(),
+                })))
+                .await;
+        }));
     }
 
     if room.active_clients.load(Ordering::Relaxed) >= state.limits.max_clients_per_room {
@@ -568,6 +582,25 @@ async fn handle_socket(socket: WebSocket, room: RoomState, room_id: String, stat
             *room.last_empty_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         }
         return;
+    }
+
+    // Send room lock status so newly connected client knows if the room is password-protected
+    let is_protected = room.pin.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+    if is_protected {
+        let auth_status = serde_json::to_vec(&serde_json::json!({
+            "type": "room_auth_status",
+            "protected": true,
+        }))
+        .unwrap_or_default();
+        let payload = serde_json::json!({
+            "type": "blob",
+            "key": "__room_auth__",
+            "mime": "application/json",
+            "dataBase64": vectorcraft_format::base64_encode(&auth_status),
+        });
+        if let Ok(json_str) = serde_json::to_string(&payload) {
+            let _ = ws_sender.send(Message::Text(json_str.into())).await;
+        }
     }
 
     // Send all existing stored image blobs to the newly connected client
@@ -686,21 +719,41 @@ async fn handle_socket(socket: WebSocket, room: RoomState, room_id: String, stat
                             if key == "__room_auth__" {
                                 if let Some(decoded_bytes) = vectorcraft_format::base64_decode(b64) {
                                     if let Ok(auth_cmd) = serde_json::from_slice::<serde_json::Value>(&decoded_bytes) {
+                                        let mut status_protected = None;
                                         match auth_cmd.get("type").and_then(|t| t.as_str()) {
                                             Some("set_room_pin") => {
                                                 if let Some(pin_val) = auth_cmd.get("pin").and_then(|p| p.as_str()) {
                                                     *room.pin.lock().unwrap_or_else(|e| e.into_inner()) = Some(pin_val.trim().to_string());
                                                     eprintln!("[server] room '{room_id}' password updated by client {client_id}");
+                                                    status_protected = Some(true);
                                                 }
                                             }
                                             Some("clear_room_pin") => {
                                                 *room.pin.lock().unwrap_or_else(|e| e.into_inner()) = None;
                                                 eprintln!("[server] room '{room_id}' password cleared by client {client_id}");
+                                                status_protected = Some(false);
                                             }
                                             _ => {}
                                         }
+                                        if let Some(protected) = status_protected {
+                                            let auth_status = serde_json::to_vec(&serde_json::json!({
+                                                "type": "room_auth_status",
+                                                "protected": protected,
+                                            }))
+                                            .unwrap_or_default();
+                                            let payload = serde_json::json!({
+                                                "type": "blob",
+                                                "key": "__room_auth__",
+                                                "mime": "application/json",
+                                                "dataBase64": vectorcraft_format::base64_encode(&auth_status),
+                                            });
+                                            if let Ok(json_str) = serde_json::to_string(&payload) {
+                                                let _ = room.broadcast_tx.send(PeerMessage::Text { sender_id: client_id, data: json_str });
+                                            }
+                                        }
                                     }
                                 }
+                                continue;
                             } else if let Some(decoded_bytes) = vectorcraft_format::base64_decode(b64) {
                                 if room.estimated_bytes() + decoded_bytes.len() <= state.limits.max_room_bytes {
                                     let mut blobs = room.blobs.lock().unwrap_or_else(|e| e.into_inner());

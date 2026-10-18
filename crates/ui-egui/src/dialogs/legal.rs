@@ -121,10 +121,22 @@ pub fn show_room_password(app: &mut VectorcraftApp, ctx: &egui::Context) {
                 ui.add_space(12.0);
 
                 let is_protected = app.collab_room_protected;
+                let auth_req = app.collab_auth_required;
                 let t = theme::Tokens::get(ui.ctx());
 
+                if auth_req {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 114, 98),
+                        "🔒 Dieser Raum ist passwortgeschützt! Bitte gib das Passwort / die PIN ein, um dich zu verbinden und live zu synchronisieren:",
+                    );
+                    ui.add_space(6.0);
+                }
+
                 ui.horizontal(|ui| {
-                    if is_protected {
+                    if auth_req {
+                        ui.label(egui::RichText::new("Status:").font(theme::semibold(13.0)));
+                        ui.label(egui::RichText::new("⛔ Nicht verbunden (Passwort erforderlich)").color(egui::Color32::from_rgb(255, 114, 98)).font(theme::semibold(13.0)));
+                    } else if is_protected {
                         ui.label(egui::RichText::new("Status:").font(theme::semibold(13.0)));
                         ui.label(egui::RichText::new("🔒 Passwortgeschützt").color(egui::Color32::from_rgb(10, 207, 131)).font(theme::semibold(13.0)));
                     } else {
@@ -134,13 +146,17 @@ pub fn show_room_password(app: &mut VectorcraftApp, ctx: &egui::Context) {
                 });
                 ui.add_space(8.0);
 
+                let mut submit_enter = false;
                 ui.horizontal(|ui| {
                     ui.label("Passwort / PIN:");
                     let edit = egui::TextEdit::singleline(&mut app.collab_password_input)
                         .password(true)
                         .hint_text("z. B. GeheimesPasswort123")
                         .desired_width(180.0);
-                    ui.add(edit);
+                    let resp = ui.add(edit);
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submit_enter = true;
+                    }
                 });
 
                 ui.add_space(14.0);
@@ -148,7 +164,14 @@ pub fn show_room_password(app: &mut VectorcraftApp, ctx: &egui::Context) {
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(if is_protected { "Passwort aktualisieren" } else { "Passwort aktivieren" })).clicked() {
+                    let btn_label = if auth_req {
+                        "Mit Passwort verbinden"
+                    } else if is_protected {
+                        "Passwort aktualisieren"
+                    } else {
+                        "Passwort aktivieren"
+                    };
+                    if ui.add(egui::Button::new(btn_label)).clicked() || submit_enter {
                         let trimmed = app.collab_password_input.trim().to_string();
                         if !trimmed.is_empty() {
                             app.set_collab_password(Some(trimmed));
@@ -156,7 +179,7 @@ pub fn show_room_password(app: &mut VectorcraftApp, ctx: &egui::Context) {
                         }
                     }
 
-                    if is_protected && ui.add(egui::Button::new(egui::RichText::new("Schutz aufheben").color(egui::Color32::from_rgb(242, 78, 30)))).clicked() {
+                    if is_protected && !auth_req && ui.add(egui::Button::new(egui::RichText::new("Schutz aufheben").color(egui::Color32::from_rgb(242, 78, 30)))).clicked() {
                         app.set_collab_password(None);
                         app.collab_password_input.clear();
                         close = true;

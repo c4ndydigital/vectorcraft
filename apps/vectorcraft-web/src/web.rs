@@ -73,8 +73,6 @@ pub mod ws {
 
         #[wasm_bindgen(extends = web_sys::Event)]
         pub type ErrorEvent;
-        #[wasm_bindgen(method, getter, js_name = message)]
-        pub fn message(this: &ErrorEvent) -> String;
     }
 
     impl WebSocket {
@@ -590,9 +588,58 @@ impl WebShell {
         }
     }
 
-    fn drain_collab_outbox(&self) {
+    fn drain_collab_outbox(&self, ctx: &egui::Context) {
         let Some(app) = &self.app else { return };
         let Some(outbox) = &app.services.collab_outbox else { return };
+
+        // Check if there is a ReconnectWithPin request even if socket is currently closed/None
+        let reconnect_pin = {
+            let mut g = outbox.lock().unwrap_or_else(|e| e.into_inner());
+            let mut found_pin = None;
+            g.retain(|item| match item {
+                CollabOutgoing::ReconnectWithPin(pin) => {
+                    found_pin = Some(pin.clone());
+                    false
+                }
+                _ => true,
+            });
+            found_pin
+        };
+
+        if let Some(pin) = reconnect_pin {
+            if let Some(win) = web_sys::window()
+                && let Ok(hist) = win.history()
+            {
+                let _ = hist.replace_state_with_url(
+                    &wasm_bindgen::JsValue::NULL,
+                    "",
+                    Some(&format!("?room={}&pin={}", app.collab_room_id, pin)),
+                );
+            }
+            let needs_reconnect = {
+                let ws_guard = self.host.ws.borrow();
+                match ws_guard.as_ref() {
+                    Some(ws) => ws.ready_state() != ws::WebSocket::OPEN,
+                    None => true,
+                }
+            };
+            if needs_reconnect {
+                {
+                    let mut ws_guard = self.host.ws.borrow_mut();
+                    if let Some(old_ws) = ws_guard.take() {
+                        let _ = old_ws.close();
+                    }
+                }
+                connect_collab(
+                    self.host.collab_inbox.clone(),
+                    ctx.clone(),
+                    self.host.ws.clone(),
+                    &app.collab_room_id,
+                    Some(pin.as_str()),
+                );
+            }
+        }
+
         let ws_guard = self.host.ws.borrow();
         let Some(ws) = ws_guard.as_ref() else { return };
         if ws.ready_state() != ws::WebSocket::OPEN {
@@ -606,6 +653,7 @@ impl WebShell {
 
         for msg in outgoing {
             match msg {
+                CollabOutgoing::ReconnectWithPin(_) => {}
                 CollabOutgoing::Update(bytes) => {
                     if let Err(e) = ws.send_with_u8_array(&bytes) {
                         log::error!("collab: send update failed: {e:?}");
@@ -622,6 +670,18 @@ impl WebShell {
                     }
                 },
                 CollabOutgoing::Blob { key, mime, bytes } => {
+                    if key == "__room_auth__"
+                        && let Ok(v) = vectorcraft_ui_egui::serde_json::from_slice::<vectorcraft_ui_egui::serde_json::Value>(&bytes)
+                        && v.get("type").and_then(|t| t.as_str()) == Some("clear_room_pin")
+                        && let Some(win) = web_sys::window()
+                        && let Ok(hist) = win.history()
+                    {
+                        let _ = hist.replace_state_with_url(
+                            &wasm_bindgen::JsValue::NULL,
+                            "",
+                            Some(&format!("?room={}", app.collab_room_id)),
+                        );
+                    }
                     let payload = vectorcraft_ui_egui::serde_json::json!({
                         "type": "blob",
                         "key": key,
@@ -675,7 +735,7 @@ impl eframe::App for WebShell {
             }
         }
         app.logic(ctx);
-        self.drain_collab_outbox();
+        self.drain_collab_outbox(ctx);
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -689,7 +749,7 @@ impl eframe::App for WebShell {
         if let Some(app) = &mut self.app {
             app.ui(ui);
         }
-        self.drain_collab_outbox();
+        self.drain_collab_outbox(ui.ctx());
     }
 }
 
@@ -714,6 +774,7 @@ fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws
     };
     socket.set_binary_type("arraybuffer");
 
+    let ever_opened = Rc::new(Cell::new(false));
     let inbox_msg = inbox.clone();
     let ctx_msg = ctx.clone();
     let onmessage = wasm_bindgen::closure::Closure::<dyn FnMut(ws::MessageEvent)>::new(move |e: ws::MessageEvent| {
@@ -749,20 +810,37 @@ fn connect_collab(inbox: Arc<Mutex<Vec<CollabIncoming>>>, ctx: egui::Context, ws
     socket.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
     onmessage.forget();
 
+    let opened_flag = ever_opened.clone();
+    let inbox_open = inbox.clone();
+    let ctx_open = ctx.clone();
     let onopen = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        opened_flag.set(true);
         log::info!("collab: WebSocket connected");
+        inbox_open.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::Connected);
+        ctx_open.request_repaint();
     });
     socket.set_onopen(Some(onopen.as_ref().unchecked_ref()));
     onopen.forget();
 
-    let onerror = wasm_bindgen::closure::Closure::<dyn FnMut(ws::ErrorEvent)>::new(move |e: ws::ErrorEvent| {
-        log::error!("collab: WebSocket error: {}", e.message());
+    let onerror = wasm_bindgen::closure::Closure::<dyn FnMut(ws::ErrorEvent)>::new(move |_e: ws::ErrorEvent| {
+        log::warn!("collab: WebSocket connection error");
     });
     socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
     onerror.forget();
 
+    let opened_on_close = ever_opened;
+    let inbox_close = inbox;
+    let ctx_close = ctx;
+    let ws_slot_close = ws_slot.clone();
     let onclose = wasm_bindgen::closure::Closure::<dyn FnMut(ws::CloseEvent)>::new(move |e: ws::CloseEvent| {
-        log::info!("collab: WebSocket closed: code={}, reason={}", e.code(), e.reason());
+        let code = e.code();
+        let reason = e.reason();
+        log::info!("collab: WebSocket closed: code={code}, reason={reason}");
+        *ws_slot_close.borrow_mut() = None;
+        if code == 4001 || (code == 1006 && !opened_on_close.get()) {
+            inbox_close.lock().unwrap_or_else(|err| err.into_inner()).push(CollabIncoming::AuthRequired);
+            ctx_close.request_repaint();
+        }
     });
     socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
     onclose.forget();

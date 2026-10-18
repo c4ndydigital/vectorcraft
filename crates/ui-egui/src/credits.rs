@@ -8,6 +8,7 @@ use std::cmp::Ordering;
 use egui::RichText;
 
 use crate::VectorcraftApp;
+use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Contributor {
@@ -256,8 +257,27 @@ pub fn contributors_ui(app: &mut VectorcraftApp, ui: &mut egui::Ui) {
             v.table = true;
         }
     });
+    // C4NDY Digital Fork contributors banner
+    ui.group(|ui| {
+        let t = theme::Tokens::get(ui.ctx());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("C4NDY Digital Fork Contributors & Team").font(theme::semibold(13.0)).color(t.accent));
+            ui.label(RichText::new("· 34 Commits · Multiplayer, Live MCP & DSGVO").small().weak());
+        });
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            let r = ui.add(egui::Link::new("@tinnitusi / Adrian Jehne (C4NDY Digital)"));
+            if r.clicked() {
+                app.open_url("https://github.com/c4ndydigital");
+            }
+            ui.label(RichText::new("— Lead Architecture, Collab CRDT, Font-Proxy, Remote MCP").small().weak());
+        });
+    });
+    ui.add_space(6.0);
+
     let list = sorted(CONTRIBUTORS, v.names, v.key, v.ascending);
     let (people, commits) = (group(list.len() as u64), group(TOTAL_COMMITS));
+    ui.label(RichText::new("Original VectorCraft Upstream:").small().weak());
     let counts = crate::i18n::fmt(tl!("{people} contributors · {commits} commits"), &[("people", &people), ("commits", &commits)]);
     ui.label(RichText::new(counts).small().weak());
     ui.separator();
@@ -321,12 +341,45 @@ fn table(app: &mut VectorcraftApp, ui: &mut egui::Ui, list: &[&Contributor], v: 
 
 /// About ▸ Models: AI models credited in Co-Authored-By trailers.
 pub fn models_ui(ui: &mut egui::Ui) {
+    // C4NDY Digital Fork AI models banner
+    ui.group(|ui| {
+        let t = theme::Tokens::get(ui.ctx());
+        ui.label(RichText::new("C4NDY Digital — KI-Entwicklungspartner").font(theme::semibold(13.0)).color(t.accent));
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new("Die Fork-Entwicklung (34 Commits, Multiplayer CRDT, Live-MCP, DSGVO-Proxy) wurde primär realisiert mit:").small().weak(),
+        );
+        ui.add_space(4.0);
+        egui::Grid::new("c4ndy_models_grid").striped(true).num_columns(4).show(ui, |ui| {
+            for h in ["Entwickler / Labor", "KI-Modell", "Einsatzbereich in C4NDY Digital", "Commits / Beiträge"] {
+                ui.label(RichText::new(h).strong().size(11.5));
+            }
+            ui.end_row();
+
+            ui.label("Google DeepMind");
+            ui.label("Gemini 4 Argon & Pro");
+            ui.label("Architektur, CRDT-Protokoll, Font-Proxy, Remote MCP SSE/RPC");
+            ui.label("Fork-Co-Author (34 Commits)");
+            ui.end_row();
+
+            ui.label("Google DeepMind");
+            ui.label("Gemini 3.8 Flash & 3.1 Pro");
+            ui.label("Wasm-Optimierung, UI-Komponenten, Stresstests & Dokumentation");
+            ui.label("Fork-Co-Author");
+            ui.end_row();
+        });
+    });
+    ui.add_space(8.0);
+
+    ui.label(RichText::new("Original VectorCraft Upstream KI-Modelle:").small().weak());
+    ui.separator();
+
     if MODELS.is_empty() {
         ui.label(tl!("No model credits were built into this copy."));
         return;
     }
     let assisted: u64 = MODELS.iter().map(|m| m.commits).max().unwrap_or(0).max(1);
-    egui::ScrollArea::both().max_height(SCROLL_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
+    egui::ScrollArea::both().max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
         egui::Grid::new("credits_models").striped(true).num_columns(6).show(ui, |ui| {
             for h in [tl!("Company"), tl!("Model"), tl!("Version"), tl!("Commits"), tl!("% of all commits"), tl!("Lines +/−")] {
                 ui.label(RichText::new(h).strong());

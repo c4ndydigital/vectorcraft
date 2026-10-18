@@ -427,3 +427,98 @@ fn a_preview_stays_put_while_the_menu_is_still() {
     assert_eq!(picked, Some(FontPick::EndPreview));
     assert_eq!(font(&app), "Inter");
 }
+
+#[test]
+fn picking_or_previewing_an_unloaded_google_font_requests_it_on_demand() {
+    use std::sync::{Arc, Mutex};
+
+    let ctx = egui::Context::default();
+    let requested: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let req_clone = requested.clone();
+
+    let mut services = crate::Services::default();
+    services.request_font = Some(Arc::new(move |family: &str, style: &str| {
+        req_clone.lock().unwrap().push((family.to_string(), style.to_string()));
+    }));
+
+    let mut app = VectorcraftApp::new(Session::new(), services);
+    app.run("file.new", json!({"width": 300, "height": 200})).unwrap();
+    let id = app.session.execute("text.create", &json!({"x": 20, "y": 50, "text": "Hello", "font": "Inter"})).unwrap()["id"].as_u64().unwrap();
+    app.session.execute("select.set", &json!({"ids": [id]})).unwrap();
+
+    // Unloaded Google font ("Roboto Slab") must NOT render a fake fallback sample before it is loaded
+    assert!(
+        crate::font_menu::render_sample_for_test("Roboto Slab", "Hello", 24).is_none(),
+        "unloaded font must not render fallback font sample in menu"
+    );
+
+    // Selecting "Roboto Slab" via apply(Chosen) must trigger request_font("Roboto Slab", "Regular")
+    crate::font_menu::apply(&mut app, &ctx, FontPick::Chosen("Roboto Slab".into(), None));
+    assert_eq!(
+        requested.lock().unwrap().as_slice(),
+        &[("Roboto Slab".to_string(), "Regular".to_string())],
+        "selecting an unloaded Google font triggers on-demand fetch"
+    );
+
+    // Selecting another unloaded font via picked() (used in Glyphs & Find Font) also triggers request_font
+    let res = crate::font_menu::picked(&mut app, Some(FontPick::Chosen("Merriweather".into(), Some("Bold".into()))));
+    assert_eq!(res, Some(("Merriweather".to_string(), Some("Bold".to_string()))));
+    assert_eq!(
+        requested.lock().unwrap().as_slice(),
+        &[
+            ("Roboto Slab".to_string(), "Regular".to_string()),
+            ("Merriweather".to_string(), "Bold".to_string()),
+        ]
+    );
+
+    // Selecting an already bundled font ("Inter") does NOT trigger request_font
+    crate::font_menu::apply(&mut app, &ctx, FontPick::Chosen("Inter".into(), None));
+    assert_eq!(requested.lock().unwrap().len(), 2, "already loaded bundled font should not trigger network fetch");
+}
+
+#[test]
+fn room_password_activation_and_auth_required_modal_flow() {
+    use std::sync::{Arc, Mutex};
+    use crate::collab::{CollabIncoming, CollabOutgoing};
+
+    let ctx = egui::Context::default();
+    let inbox: Arc<Mutex<Vec<CollabIncoming>>> = Arc::new(Mutex::new(Vec::new()));
+    let outbox: Arc<Mutex<Vec<CollabOutgoing>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let mut services = crate::Services::default();
+    services.collab_inbox = Some(inbox.clone());
+    services.collab_outbox = Some(outbox.clone());
+
+    let mut app = VectorcraftApp::new(Session::new(), services);
+    app.collab_share_url = "https://vector.c4ndy.com/?room=c4ndy-test".to_string();
+
+    // 1. Server notifies client that room requires a PIN (4001 PIN_REQUIRED -> CollabIncoming::AuthRequired)
+    inbox.lock().unwrap().push(CollabIncoming::AuthRequired);
+    app.handle_collab(&ctx, 1.0);
+    assert!(app.collab_room_protected, "room marked protected");
+    assert!(app.collab_auth_required, "auth_required flag set");
+    assert!(app.ui.room_password, "password dialog automatically opened");
+
+    // 2. User enters password / activates PIN protection
+    app.set_collab_password(Some("geheim123".to_string()));
+    assert!(app.collab_room_protected);
+    assert!(!app.collab_auth_required);
+    assert_eq!(app.collab_share_url, "https://vector.c4ndy.com/?room=c4ndy-test&pin=geheim123");
+
+    let queued = outbox.lock().unwrap().clone();
+    assert!(
+        queued.iter().any(|m| matches!(m, CollabOutgoing::ReconnectWithPin(p) if p == "geheim123")),
+        "ReconnectWithPin queued in collab outbox"
+    );
+    assert!(
+        queued.iter().any(|m| matches!(m, CollabOutgoing::Blob { key, .. } if key == "__room_auth__")),
+        "set_room_pin blob queued in collab outbox"
+    );
+
+    // 3. Removing password protection clears flag and strips pin from share URL
+    outbox.lock().unwrap().clear();
+    app.set_collab_password(None);
+    assert!(!app.collab_room_protected);
+    assert_eq!(app.collab_share_url, "https://vector.c4ndy.com/?room=c4ndy-test");
+}
+

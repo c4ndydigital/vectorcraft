@@ -125,3 +125,44 @@ async fn test_font_path_traversal_rejection() {
 
     let _ = std::fs::remove_dir_all(&temp_dist);
 }
+
+#[tokio::test]
+async fn test_font_css2_on_demand_ttf_fetch() {
+    let temp_dist = std::env::temp_dir().join(format!("test-dist-css2-{}", std::process::id()));
+    let temp_fonts = temp_dist.join("fonts");
+    let _ = std::fs::remove_dir_all(&temp_dist);
+    std::fs::create_dir_all(&temp_fonts).unwrap();
+
+    let state = server_main::AppState {
+        rooms: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        limits: server_main::ServerLimits::default(),
+        dist_path: temp_dist.clone(),
+        fonts_config: FontCdnConfig {
+            enabled: true,
+            cache_dir: temp_fonts.clone(),
+            upstream_base: "https://cdn.jsdelivr.net/gh/google/fonts@main".to_string(),
+        },
+        active_connections: Arc::new(AtomicUsize::new(0)),
+        start_time: Instant::now(),
+        mcp_sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+    };
+
+    let app = server_main::build_app(state, &temp_dist);
+
+    let response = app
+        .oneshot(Request::builder().uri("/fonts/css2/Roboto+Slab/Regular.ttf").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("content-type").unwrap(), "font/ttf");
+    assert_eq!(response.headers().get("x-cache").unwrap(), "MISS");
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.len() > 10_000, "downloaded TrueType font should have substantial size");
+    // TrueType sfnt version 0x00010000
+    assert_eq!(&body[..4], &[0x00, 0x01, 0x00, 0x00], "must be a valid uncompressed TrueType font");
+
+    let _ = std::fs::remove_dir_all(&temp_dist);
+}
+

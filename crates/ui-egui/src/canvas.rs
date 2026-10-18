@@ -316,6 +316,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         anti_alias: app.session.prefs.anti_aliased_artwork,
         highlight_alternate_glyphs: app.session.prefs.highlight_alternate_glyphs,
         placed: vectorcraft_render::placed_document::generation(),
+        fonts: vectorcraft_text::FontDb::global().generation(),
         pixel,
         smooth_images,
         isolated: st.isolation.map(|id| id.0),

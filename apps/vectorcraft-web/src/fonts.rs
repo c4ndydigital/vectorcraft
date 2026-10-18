@@ -104,7 +104,7 @@ async fn fetch(url: &str, integrity: &str, timeout_ms: i32) -> Result<Vec<u8>, S
     result
 }
 
-/// Fetch a font on-demand from the server font proxy (e.g. `/fonts/{clean_family}/...`)
+/// Fetch a font on-demand from the server font proxy (e.g. `/fonts/css2/{family}/...`)
 /// and register it in `FontDb::global()`. Request a repaint on `ctx` when loaded.
 pub fn fetch_font_on_demand(family: &str, style: &str, ctx: egui::Context) {
     use std::sync::Mutex;
@@ -117,7 +117,7 @@ pub fn fetch_font_on_demand(family: &str, style: &str, ctx: egui::Context) {
         if reqs.contains(&key) {
             return;
         }
-        reqs.insert(key);
+        reqs.insert(key.clone());
     }
 
     let fam = family.to_string();
@@ -126,14 +126,24 @@ pub fn fetch_font_on_demand(family: &str, style: &str, ctx: egui::Context) {
     wasm_bindgen_futures::spawn_local(async move {
         let clean_fam = fam.to_lowercase().replace([' ', '-', '_'], "");
         let raw_fam = fam.replace(' ', "");
-        let lower_fam = fam.to_lowercase().replace(' ', "-");
+        let encoded_fam = fam.trim().replace(' ', "+");
         let is_bold = sty.to_lowercase().contains("bold") || sty.contains("700");
         let is_italic = sty.to_lowercase().contains("italic");
 
-        // Candidate URLs to query on the proxy
-        let mut candidates = vec![];
+        let style_tag = match (is_bold, is_italic) {
+            (true, true) => "BoldItalic",
+            (true, false) => "Bold",
+            (false, true) => "Italic",
+            (false, false) => "Regular",
+        };
 
-        // 1. Google Fonts GitHub raw repo conventions
+        // Candidate URLs to query on the server proxy (all returning uncompressed TTF/OTF for skrifa/harfrust)
+        let mut candidates = vec![
+            // 1. Exact Google Fonts CSS2 API TTF lookup via server proxy (handles all 1,941+ families, licences, and variable/static naming)
+            format!("/fonts/css2/{encoded_fam}/{style_tag}.ttf"),
+        ];
+
+        // 2. Google Fonts GitHub raw repo conventions
         if is_bold && is_italic {
             candidates.push(format!("/fonts/{clean_fam}/{raw_fam}-BoldItalic.ttf"));
             candidates.push(format!("/fonts/{clean_fam}/{raw_fam}-Italic[wght].ttf"));
@@ -155,19 +165,13 @@ pub fn fetch_font_on_demand(family: &str, style: &str, ctx: egui::Context) {
         // General fallback static filename
         candidates.push(format!("/fonts/{clean_fam}/{raw_fam}.ttf"));
 
-        // 2. Fontsource files
-        let weight_str = if is_bold { "700" } else { "400" };
-        let style_str = if is_italic { "italic" } else { "normal" };
-        candidates.push(format!("/fonts/{lower_fam}/files/{lower_fam}-latin-{weight_str}-{style_str}.woff2"));
-        candidates.push(format!("/fonts/{lower_fam}/files/{lower_fam}-all-{weight_str}-{style_str}.woff"));
-
         let mut loaded = false;
         for url in candidates {
             match fetch_simple(&url, 15_000).await {
                 Ok(bytes) => {
                     let added = FontDb::global().add_font(bytes);
-                    if added > 0 {
-                        log::info!("successfully loaded on-demand font '{fam}' from {url}");
+                    if added > 0 || FontDb::global().has_family(&fam) {
+                        log::info!("successfully loaded on-demand font '{fam}' ({sty}) from {url}");
                         loaded = true;
                         ctx.request_repaint();
                         break;
@@ -178,6 +182,10 @@ pub fn fetch_font_on_demand(family: &str, style: &str, ctx: egui::Context) {
         }
 
         if !loaded {
+            // Allow future retry if network/proxy temporarily failed
+            if let Ok(mut reqs) = REQUESTED.lock() {
+                reqs.remove(&key);
+            }
             log::warn!("could not fetch on-demand font '{fam}' '{sty}' from any proxy candidate URL");
         }
     });

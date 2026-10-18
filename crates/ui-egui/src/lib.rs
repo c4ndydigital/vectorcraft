@@ -333,12 +333,12 @@ pub struct CanvasCache {
     /// The marks Type → Show Hidden Characters drew on each text object in the last frame. A frame
     /// that does not draw them drops them ([`canvas::show`]).
     pub hidden_chars: canvas::HiddenChars,
-    /// [`VectorcraftApp::selection_box`] for (document uid, revision, Use Preview Bounds).
-    pub selection_box: Option<((u64, u64, bool), Option<vectorcraft_doc::OrientedBox>)>,
-    /// [`VectorcraftApp::selection_bounds`] for (document uid, revision).
-    pub selection_bounds: Option<((u64, u64), Option<vectorcraft_geom::Rect>)>,
-    /// [`VectorcraftApp::content_bounds`] for (document uid, revision).
-    pub content_bounds: Option<((u64, u64), Option<vectorcraft_geom::Rect>)>,
+    /// [`VectorcraftApp::selection_box`] for (document uid, revision, Use Preview Bounds, font generation).
+    pub selection_box: Option<((u64, u64, bool, u64), Option<vectorcraft_doc::OrientedBox>)>,
+    /// [`VectorcraftApp::selection_bounds`] for (document uid, revision, font generation).
+    pub selection_bounds: Option<((u64, u64, u64), Option<vectorcraft_geom::Rect>)>,
+    /// [`VectorcraftApp::content_bounds`] for (document uid, revision, font generation).
+    pub content_bounds: Option<((u64, u64, u64), Option<vectorcraft_geom::Rect>)>,
     /// The tools' cursors as OS cursor bitmaps.
     pub cursors: cursors::Images,
 }
@@ -375,6 +375,8 @@ pub struct CacheKey {
     pub highlight_alternate_glyphs: bool,
     /// [`vectorcraft_render::placed_document::generation`]: placed documents' bitmaps made since.
     pub placed: u64,
+    /// [`vectorcraft_text::FontDb::generation`]: fonts added or rescanned since.
+    pub fonts: u64,
     /// View › Pixel Preview: the document pixels rendered (x0, y0, x1, y1), one per point, shown
     /// with hard edges. None: the art is rendered for the screen.
     pub pixel: Option<[i64; 4]>,
@@ -1161,13 +1163,10 @@ impl VectorcraftApp {
         self.ui.recent_fonts.get(..n).unwrap_or(&self.ui.recent_fonts)
     }
 
-    /// The selection's bounding box, rotated with rotated objects ([`Session::transform_box`]); with
-    /// anchors selected with Direct Selection, the box around them square to the page, which
-    /// `object.setBounds` then edits (#1824). The canvas and the transform fields read it every
-    /// frame: it is measured once per revision.
+    /// [`CanvasCache::selection_box`]: the selection's box for (document uid, revision, preview bounds, font generation).
     pub fn selection_box(&mut self) -> Option<vectorcraft_doc::OrientedBox> {
         let st = self.session.active()?;
-        let key = (st.uid, st.revision, self.session.prefs.use_preview_bounds);
+        let key = (st.uid, st.revision, self.session.prefs.use_preview_bounds, vectorcraft_text::FontDb::global().generation());
         if let Some((k, b)) = self.canvas.selection_box
             && k == key
         {
@@ -1186,7 +1185,7 @@ impl VectorcraftApp {
     /// hundreds of thousands of paths).
     pub fn selection_bounds(&mut self) -> Option<vectorcraft_geom::Rect> {
         let st = self.session.active()?;
-        let key = (st.uid, st.revision);
+        let key = (st.uid, st.revision, vectorcraft_text::FontDb::global().generation());
         if let Some((k, b)) = self.canvas.selection_bounds
             && k == key
         {
@@ -1201,7 +1200,7 @@ impl VectorcraftApp {
     /// per revision, as the canvas reads it every frame.
     pub fn content_bounds(&mut self) -> Option<vectorcraft_geom::Rect> {
         let st = self.session.active()?;
-        let key = (st.uid, st.revision);
+        let key = (st.uid, st.revision, vectorcraft_text::FontDb::global().generation());
         if let Some((k, b)) = self.canvas.content_bounds
             && k == key
         {

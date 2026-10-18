@@ -550,6 +550,8 @@ struct Samples {
     ready: HashMap<Key, Option<egui::TextureHandle>>,
     #[cfg(not(target_arch = "wasm32"))]
     pending: HashMap<Key, std::sync::mpsc::Receiver<Option<egui::ColorImage>>>,
+    /// The `FontDb` generation the cached samples were rendered against.
+    generation: u64,
     /// The pass the budget is for, and the samples started in it.
     pass: u64,
     started: usize,
@@ -581,11 +583,23 @@ thread_local! {
 /// on native (the worker asks for a frame when it is done), a few per frame; `None` until it is
 /// ready.
 fn sample_texture(ctx: &egui::Context, family: &str, style: Option<&str>, sample: Option<&str>, height: f32) -> Option<egui::TextureHandle> {
+    let db = vectorcraft_text::FontDb::global();
+    // Unloaded remote fonts have no sample texture until fetched on demand.
+    if !db.has_family(family) {
+        return None;
+    }
+    let generation = db.generation();
     let px = (height * ctx.pixels_per_point()).round().clamp(8.0, 96.0) as u32;
     let key: Key = (family.to_string(), style.unwrap_or("Regular").to_string(), sample.unwrap_or_default().to_string(), px);
     let texture = |img: egui::ColorImage| ctx.load_texture(format!("font-sample-{family}-{px}"), img, egui::TextureOptions::LINEAR);
     SAMPLES.with(|s| {
         let mut s = s.borrow_mut();
+        if s.generation != generation {
+            s.ready.clear();
+            #[cfg(not(target_arch = "wasm32"))]
+            s.pending.clear();
+            s.generation = generation;
+        }
         if let Some(t) = s.ready.get(&key) {
             return t.clone();
         }
@@ -644,12 +658,13 @@ const MAX_ASPECT: f32 = 10.0;
 /// `px` pixels high: a coverage mask as white with alpha.
 fn render_sample(family: &str, style: &str, text: &str, px: u32) -> Option<egui::ColorImage> {
     let db = vectorcraft_text::FontDb::global();
+    let (canonical_family, _) = db.canonical(family, style);
     let face: Arc<vectorcraft_text::FontFace> = db.face(family, style)?;
-    let covers = |s: &str| !s.trim().is_empty() && s.chars().filter(|c| !c.is_whitespace()).all(|c| face.covers(c));
-    let text = if covers(text) { text } else { FALLBACK_SAMPLE };
-    if !covers(text) && !face.family.eq_ignore_ascii_case(family) {
+    if !face.family.eq_ignore_ascii_case(&canonical_family) && !face.family.eq_ignore_ascii_case(family) {
         return None;
     }
+    let covers = |s: &str| !s.trim().is_empty() && s.chars().filter(|c| !c.is_whitespace()).all(|c| face.covers(c));
+    let text = if covers(text) { text } else { FALLBACK_SAMPLE };
     let (asc, desc) = face.vertical_metrics();
     let em = (asc + desc).max(1.0) / face.units_per_em();
     // The em box fills the height with a little air.
@@ -705,6 +720,22 @@ pub(crate) fn end_stale_preview(app: &mut VectorcraftApp, ctx: &egui::Context) {
     }
 }
 
+/// Ensure `family` (and `style`) is fetched on demand if it is not yet loaded in `FontDb`.
+pub(crate) fn ensure_font_requested(app: &mut VectorcraftApp, family: &str, style: Option<&str>) {
+    if let Some(req) = &app.services.request_font {
+        let db = vectorcraft_text::FontDb::global();
+        let req_style = style.unwrap_or("Regular");
+        let missing = !db.has_family(family)
+            || db
+                .resolve(family, req_style)
+                .is_none_or(|(_, m)| m == vectorcraft_text::FontMatch::Missing);
+        if missing {
+            req(family, req_style);
+            app.ui.status = format!("Loading font '{family}' on-demand...");
+        }
+    }
+}
+
 /// What the font menus preview on and apply to: the Type tool's selected range while it edits
 /// text (the whole text when nothing is selected), else the selected text objects.
 pub(crate) fn apply(app: &mut VectorcraftApp, ctx: &egui::Context, pick: FontPick) {
@@ -718,6 +749,7 @@ pub(crate) fn apply(app: &mut VectorcraftApp, ctx: &egui::Context, pick: FontPic
                 }
                 crate::panels::set_pstate(ctx, PREVIEWING, true);
             }
+            ensure_font_requested(app, &f, style.as_deref());
             let (cmd, params) = font_command(app, &f, style.as_deref());
             if let Err(e) = app.session.preview(cmd, &params) {
                 app.ui.status = e.to_string();
@@ -738,13 +770,7 @@ pub(crate) fn apply(app: &mut VectorcraftApp, ctx: &egui::Context, pick: FontPic
                 crate::panels::set_pstate(ctx, PREVIEWING, false);
             }
             crate::panels::character::end_typing(app);
-            if let Some(req) = &app.services.request_font {
-                let db = vectorcraft_text::FontDb::global();
-                if db.face(&f, style.as_deref().unwrap_or("Regular")).is_none() {
-                    req(&f, style.as_deref().unwrap_or("Regular"));
-                    app.ui.status = format!("Loading font '{f}' on-demand...");
-                }
-            }
+            ensure_font_requested(app, &f, style.as_deref());
             let (cmd, params) = font_command(app, &f, style.as_deref());
             app.run(cmd, params).ok();
         }
@@ -767,7 +793,10 @@ fn toggle_favorite(app: &mut VectorcraftApp, family: String) {
 /// highlighted row is not previewed.
 pub(crate) fn picked(app: &mut VectorcraftApp, pick: Option<FontPick>) -> Option<(String, Option<String>)> {
     match pick? {
-        FontPick::Chosen(f, style) => Some((f, style)),
+        FontPick::Chosen(f, style) => {
+            ensure_font_requested(app, &f, style.as_deref());
+            Some((f, style))
+        }
         FontPick::Favorite(f) => {
             toggle_favorite(app, f);
             None

@@ -206,6 +206,11 @@ impl VectorcraftApp {
                             self.collab_doc_revisions.retain(|uid, _| current_uids.contains(uid));
                             for doc_st in self.session.documents() {
                                 self.collab_doc_revisions.insert(doc_st.uid, doc_st.revision);
+                                if let Some(req) = &self.services.request_font {
+                                    for m in vectorcraft_engine::cmd::fontfiles::missing_fonts(&doc_st.doc) {
+                                        req(&m.family, &m.style);
+                                    }
+                                }
                             }
                             self.collab_last_doc_count = self.session.documents().len();
                             if let Some(st) = self.session.active() {

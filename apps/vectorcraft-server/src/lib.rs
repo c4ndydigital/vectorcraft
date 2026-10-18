@@ -541,20 +541,110 @@ pub async fn fetch_and_cache_font(
     }
 
     // 4. On-demand upstream fetch via server-side curl (100% DSGVO compliant: client never contacts Google/upstream)
-    let mut candidate_urls = vec![
+    let tmp_dir = config.cache_dir.join(".tmp");
+    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_file = tmp_dir.join(format!("fetch-{}-{}", std::process::id(), nonce));
+
+    let mut candidate_urls = Vec::new();
+
+    // 4a. If path starts with "css2/" (e.g. "css2/Roboto Slab/Regular.ttf") or is "<family>/<file>.ttf",
+    // resolve exact TTF download URLs via Google Fonts CSS2 API (which returns uncompressed TrueType URLs when queried with a non-woff2 UA like curl).
+    let css2_lookup: Option<(String, bool, bool)> = if let Some(rest) = clean.strip_prefix("css2/") {
+        if let Some((fam_part, style_part)) = rest.split_once('/') {
+            let fam_decoded = fam_part.replace("%20", " ").replace('+', " ");
+            let sty_lower = style_part.to_lowercase();
+            let is_bold = sty_lower.contains("bold") || sty_lower.contains("700");
+            let is_italic = sty_lower.contains("italic");
+            Some((fam_decoded, is_bold, is_italic))
+        } else {
+            None
+        }
+    } else if clean.ends_with(".ttf")
+        && let Some((fam_part, file_part)) = clean.split_once('/')
+    {
+        // Recover human-readable family name from CamelCase filename if possible (e.g. "RobotoSlab-Regular.ttf" -> "Roboto Slab")
+        let stem = file_part
+            .trim_end_matches(".ttf")
+            .split(['-', '['])
+            .next()
+            .unwrap_or(fam_part);
+        let mut spaced = String::new();
+        let chars: Vec<char> = stem.chars().collect();
+        for (idx, &ch) in chars.iter().enumerate() {
+            if idx > 0 {
+                let prev = chars[idx - 1];
+                let next_is_lower = chars.get(idx + 1).is_some_and(|c| c.is_ascii_lowercase());
+                if (ch.is_ascii_uppercase() && (prev.is_ascii_lowercase() || (prev.is_ascii_uppercase() && next_is_lower)))
+                    || (ch.is_ascii_digit() && prev.is_ascii_alphabetic())
+                {
+                    spaced.push(' ');
+                }
+            }
+            spaced.push(ch);
+        }
+        let sty_lower = file_part.to_lowercase();
+        let is_bold = sty_lower.contains("bold") || sty_lower.contains("700");
+        let is_italic = sty_lower.contains("italic");
+        Some((spaced, is_bold, is_italic))
+    } else {
+        None
+    };
+
+    if let Some((fam_name, want_bold, want_italic)) = css2_lookup {
+        let fam_query = fam_name.trim().replace(' ', "+");
+        let weight = if want_bold { "700" } else { "400" };
+        let italic_flag = if want_italic { "1" } else { "0" };
+        let css_queries = [
+            format!("https://fonts.googleapis.com/css2?family={fam_query}:ital,wght@{italic_flag},{weight}"),
+            format!("https://fonts.googleapis.com/css2?family={fam_query}:wght@{weight}"),
+            format!("https://fonts.googleapis.com/css2?family={fam_query}"),
+        ];
+        for css_url in css_queries {
+            if let Ok(output) = tokio::process::Command::new("curl")
+                .args(["-g", "-sSL", "--fail", "--max-time", "10", &css_url])
+                .output()
+                .await
+                && output.status.success()
+            {
+                let css_text = String::from_utf8_lossy(&output.stdout);
+                for segment in css_text.split("url(").skip(1) {
+                    if let Some(end) = segment.find(')') {
+                        let font_url = segment[..end].trim().trim_matches(['\'', '"']);
+                        if (font_url.starts_with("https://fonts.gstatic.com/") || font_url.starts_with("http://fonts.gstatic.com/"))
+                            && (font_url.ends_with(".ttf") || font_url.ends_with(".otf"))
+                        {
+                            candidate_urls.push(font_url.to_string());
+                        }
+                    }
+                }
+                if !candidate_urls.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // 4b. Direct upstream GitHub / jsDelivr Google Fonts repository fallbacks
+    candidate_urls.extend([
         format!("{}/{}", config.upstream_base.trim_end_matches('/'), clean),
         format!("https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/{}", clean),
         format!("https://cdn.jsdelivr.net/gh/google/fonts@main/apache/{}", clean),
         format!("https://cdn.jsdelivr.net/gh/google/fonts@main/ufl/{}", clean),
         format!("https://cdn.jsdelivr.net/gh/google/fonts@main/{}", clean),
-        format!("https://cdn.jsdelivr.net/npm/@fontsource/{}", clean),
         format!("https://raw.githubusercontent.com/google/fonts/main/ofl/{}", clean),
         format!("https://raw.githubusercontent.com/google/fonts/main/apache/{}", clean),
         format!("https://raw.githubusercontent.com/google/fonts/main/ufl/{}", clean),
         format!("https://raw.githubusercontent.com/google/fonts/main/{}", clean),
-    ];
+        format!("https://cdn.jsdelivr.net/npm/@fontsource/{}", clean),
+    ]);
 
-    if let Some((family, file)) = clean.split_once('/') {
+    if let Some((family, file)) = clean.split_once('/')
+        && family != "css2"
+    {
         let norm_fam = family.to_lowercase().replace([' ', '-', '_'], "");
         if norm_fam != family {
             candidate_urls.push(format!("https://raw.githubusercontent.com/google/fonts/main/ofl/{}/{}", norm_fam, file));
@@ -569,14 +659,6 @@ pub async fn fetch_and_cache_font(
         }
     }
 
-    let tmp_dir = config.cache_dir.join(".tmp");
-    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp_file = tmp_dir.join(format!("fetch-{}-{}", std::process::id(), nonce));
-
     let mut fetched_bytes: Option<Vec<u8>> = None;
 
     for url in candidate_urls {
@@ -586,15 +668,13 @@ pub async fn fetch_and_cache_font(
             .status()
             .await;
 
-        if let Ok(exit) = status {
-            if exit.success() {
-                if let Ok(bytes) = tokio::fs::read(&tmp_file).await {
-                    if !bytes.is_empty() {
-                        fetched_bytes = Some(bytes);
-                        break;
-                    }
-                }
-            }
+        if let Ok(exit) = status
+            && exit.success()
+            && let Ok(bytes) = tokio::fs::read(&tmp_file).await
+            && bytes.len() >= 4
+        {
+            fetched_bytes = Some(bytes);
+            break;
         }
         let _ = tokio::fs::remove_file(&tmp_file).await;
     }

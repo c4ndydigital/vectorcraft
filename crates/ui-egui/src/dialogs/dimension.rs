@@ -173,6 +173,7 @@ fn body(app: &mut VectorcraftApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             if let Some(crate::font_menu::FontPick::Chosen(family, style)) =
                 crate::font_menu::font_menu(ui, "dimension-font", &family, 280.0, Some("123.45"), crate::font_menu::MenuLook::of(app))
             {
+                crate::font_menu::ensure_font_requested(app, &family, style.as_deref());
                 f.insert("fontFamily".into(), json!(family));
                 f.insert("fontStyle".into(), json!(style.unwrap_or_else(|| "Regular".into())));
             }

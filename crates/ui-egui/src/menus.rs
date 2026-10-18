@@ -3607,7 +3607,11 @@ pub fn invoke(app: &mut VectorcraftApp, id: &str, p: Value) {
         app.ui.about = true;
         return;
     }
-    if matches!(id, "help.discord" | "help.website" | "help.appPage" | "help.github") {
+    if id == "help.github" {
+        app.open_url("https://github.com/c4ndydigital/vectorcraft");
+        return;
+    }
+    if matches!(id, "help.discord" | "help.website" | "help.appPage") {
         app.open_link(id);
         return;
     }

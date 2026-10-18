@@ -90,6 +90,9 @@ const SCRIPTS: usize = 4;
 /// Popular Google Fonts available on-demand from the server proxy.
 pub const POPULAR_GOOGLE_FONTS: &[&str] = &[
     "Roboto",
+    "Roboto Slab",
+    "Roboto Condensed",
+    "Roboto Mono",
     "Montserrat",
     "Poppins",
     "Open Sans",
@@ -100,6 +103,7 @@ pub const POPULAR_GOOGLE_FONTS: &[&str] = &[
     "Playfair Display",
     "Merriweather",
     "Nunito",
+    "Nunito Sans",
     "Rubik",
     "Ubuntu",
     "Lora",
@@ -107,8 +111,15 @@ pub const POPULAR_GOOGLE_FONTS: &[&str] = &[
     "PT Serif",
     "Work Sans",
     "Fira Sans",
+    "Fira Code",
     "Barlow",
     "Inconsolata",
+    "Quicksand",
+    "Bebas Neue",
+    "Cinzel",
+    "Cabin",
+    "Source Code Pro",
+    "Zilla Slab",
 ];
 
 fn script_label(i: usize) -> &'static str {
@@ -339,6 +350,27 @@ fn list(ui: &mut Ui, state_id: egui::Id, st: &mut MenuState, current: &str, samp
                 rows.push(Row::Family(gf.to_string()));
             }
         }
+        // If the user typed a specific search query (e.g. "Roboto Slab", "Lora", etc.)
+        // and no existing family exactly matches, offer it as an on-demand font candidate
+        let trimmed_q = query.trim();
+        if !trimmed_q.is_empty() && !seen_families.contains(&trimmed_q.to_lowercase()) {
+            let already_in_rows = rows.iter().any(|r| r.family().eq_ignore_ascii_case(trimmed_q));
+            if !already_in_rows {
+                // Capitalize words nicely for the font row display
+                let formatted_name: String = trimmed_q
+                    .split_whitespace()
+                    .map(|w| {
+                        let mut c = w.chars();
+                        match c.next() {
+                            None => String::new(),
+                            Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                rows.push(Row::Family(formatted_name));
+            }
+        }
         // Filter changes (including un-starring a favourite) may remove rows; expanding
         // another family or a background font scan can insert rows before the highlight.
         // Never preview an unrelated family because the old numeric index now points to it.
@@ -459,11 +491,20 @@ fn list(ui: &mut Ui, state_id: egui::Id, st: &mut MenuState, current: &str, samp
                 Row::Style(_, style) => style.clone(),
                 Row::Family(f) => db.family_display_name(f, look.english_names),
             };
-            ui.painter_at(name_rect).text(name_rect.left_center(), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), t.text);
+            let is_remote = db.styles(row.family()).is_empty();
+            let display_name = if is_remote {
+                format!("{name} ☁")
+            } else {
+                name
+            };
+            ui.painter_at(name_rect).text(name_rect.left_center(), egui::Align2::LEFT_CENTER, display_name, egui::FontId::proportional(12.0), if is_remote { t.accent } else { t.text });
             let sample_rect = egui::Rect::from_min_max(rect.min + vec2(name_w, 2.0), rect.max - vec2(STAR + 2.0, 2.0));
             if !look.samples {
             } else if let Some(tex) = sample_texture(ui.ctx(), row.family(), row.style(), sample, sample_rect.height()) {
                 paint_sample(ui, sample_rect, &tex, t.text);
+            } else if is_remote {
+                // If font is on-demand, show a helpful hint in the sample area
+                ui.painter_at(sample_rect).text(sample_rect.left_center(), egui::Align2::LEFT_CENTER, "Klicken zum Nachladen", egui::FontId::proportional(11.0), t.text_dim);
             }
             if resp.clicked() && !on_triangle && !on_star {
                 chosen = Some(row.pick());

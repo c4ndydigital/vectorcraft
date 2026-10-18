@@ -931,4 +931,100 @@ fn test_adversarial_room_password_flow() {
     }
 }
 
+/// 11. EMPIRICAL TEST: Verify ruler guide (Hilfslinien) synchronization across peers.
+#[test]
+fn test_adversarial_ruler_guides_sync() {
+    let inbox_a = Arc::new(Mutex::new(Vec::new()));
+    let outbox_a = Arc::new(Mutex::new(Vec::new()));
+    let inbox_b = Arc::new(Mutex::new(Vec::new()));
+    let outbox_b = Arc::new(Mutex::new(Vec::new()));
+
+    let services_a = Services { collab_inbox: Some(inbox_a.clone()), collab_outbox: Some(outbox_a.clone()), ..Default::default() };
+    let services_b = Services { collab_inbox: Some(inbox_b.clone()), collab_outbox: Some(outbox_b.clone()), ..Default::default() };
+
+    let mut app_a = VectorcraftApp::new(Session::new(), services_a);
+    let mut app_b = VectorcraftApp::new(Session::new(), services_b);
+
+    app_a.run("file.new", json!({"width": 800, "height": 600})).expect("file.new a");
+    app_b.run("file.new", json!({"width": 800, "height": 600})).expect("file.new b");
+
+    let ctx = egui::Context::default();
+
+    // Peer A adds a vertical ruler guide at x = 150.0 and a horizontal guide at y = 300.0
+    {
+        let doc = Arc::make_mut(&mut app_a.session.active_mut().unwrap().doc);
+        doc.guides.push(vectorcraft_doc::Guide {
+            vertical: true,
+            pos: 150.0,
+            artboard: None,
+            layer: None,
+        });
+        doc.guides.push(vectorcraft_doc::Guide {
+            vertical: false,
+            pos: 300.0,
+            artboard: None,
+            layer: None,
+        });
+        app_a.session.active_mut().unwrap().revision += 1;
+    }
+
+    // Peer A ticks collab: exports CRDT update containing guides
+    app_a.handle_collab(&ctx, 1.0);
+
+    let mut out_a = outbox_a.lock().unwrap();
+    assert_eq!(out_a.len(), 1, "Peer A emits 1 update for guides");
+    let update = match out_a.pop().unwrap() {
+        CollabOutgoing::Update(b) => b,
+        _ => panic!("Expected CollabOutgoing::Update"),
+    };
+    drop(out_a);
+
+    // Deliver to Peer B
+    inbox_b.lock().unwrap().push(CollabIncoming::Update(update));
+    app_b.handle_collab(&ctx, 1.0);
+
+    // Peer B should now have the exact same ruler guides!
+    let b_doc = &app_b.session.active().unwrap().doc;
+    assert_eq!(b_doc.guides.len(), 2, "Peer B has 2 guides");
+    assert!(b_doc.guides[0].vertical);
+    assert_eq!(b_doc.guides[0].pos, 150.0);
+    assert!(!b_doc.guides[1].vertical);
+    assert_eq!(b_doc.guides[1].pos, 300.0);
+
+    // Peer B modifies / removes a guide and adds another
+    {
+        let doc_b_mut = Arc::make_mut(&mut app_b.session.active_mut().unwrap().doc);
+        doc_b_mut.guides.remove(0); // remove vertical
+        doc_b_mut.guides.push(vectorcraft_doc::Guide {
+            vertical: true,
+            pos: 450.0,
+            artboard: None,
+            layer: None,
+        });
+        app_b.session.active_mut().unwrap().revision += 1;
+    }
+
+    app_b.handle_collab(&ctx, 2.0);
+    let mut out_b = outbox_b.lock().unwrap();
+    assert_eq!(out_b.len(), 1, "Peer B emits 1 update");
+    let update_b = match out_b.pop().unwrap() {
+        CollabOutgoing::Update(b) => b,
+        _ => panic!("Expected CollabOutgoing::Update"),
+    };
+    drop(out_b);
+
+    // Deliver to Peer A
+    inbox_a.lock().unwrap().push(CollabIncoming::Update(update_b));
+    app_a.handle_collab(&ctx, 2.1);
+
+    // Peer A should reflect Peer B's guide update
+    let a_doc = &app_a.session.active().unwrap().doc;
+    assert_eq!(a_doc.guides.len(), 2, "Peer A now has 2 guides");
+    assert!(!a_doc.guides[0].vertical);
+    assert_eq!(a_doc.guides[0].pos, 300.0);
+    assert!(a_doc.guides[1].vertical);
+    assert_eq!(a_doc.guides[1].pos, 450.0);
+}
+
+
 

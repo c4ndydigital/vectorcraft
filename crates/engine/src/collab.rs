@@ -38,6 +38,8 @@ pub struct CrdtTab {
     pub id: String,
     pub title: String,
     pub artboards: Vec<vectorcraft_doc::Artboard>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guides: Vec<vectorcraft_doc::Guide>,
     #[serde(default)]
     pub order: usize,
     /// Explicit Z-order skeleton per container in this tab:
@@ -69,6 +71,8 @@ pub struct TabSyncState {
     pub last_title: String,
     /// Last synced artboards for this tab.
     pub last_artboards: Vec<vectorcraft_doc::Artboard>,
+    /// Last synced ruler guides for this tab.
+    pub last_guides: Vec<vectorcraft_doc::Guide>,
     /// Snapshot of top-level layer `Arc<Node>` pointers from the last sync for O(1) pointer checks.
     pub synced_layers: Vec<Arc<Node>>,
     /// Synced non-layer nodes in this tab: maps `NodeId` -> `(Arc<Node>, parent_id, sibling_index)`.
@@ -237,6 +241,7 @@ impl TabSyncState {
 
         self.synced_layers = doc.layers.clone();
         self.last_artboards = doc.artboards.clone();
+        self.last_guides = doc.guides.clone();
         self.last_revision = Some(revision);
         self.last_order = Some(order);
         self.last_title = title;
@@ -548,10 +553,12 @@ impl CollabBridge {
                 .unwrap_or_else(|| format!("Tab {}", idx + 1));
 
             let artboards_changed = tab_state.last_artboards != st.doc.artboards;
+            let guides_changed = tab_state.last_guides != st.doc.guides;
             let meta_changed = tab_state.last_revision.is_none()
                 || tab_state.last_order != Some(idx)
                 || tab_state.last_title != title
                 || artboards_changed
+                || guides_changed
                 || tab_state.structure_dirty;
 
             if meta_changed {
@@ -559,6 +566,7 @@ impl CollabBridge {
                     id: tab_id.clone(),
                     title: title.clone(),
                     artboards: st.doc.artboards.clone(),
+                    guides: st.doc.guides.clone(),
                     order: idx,
                     z_order: tab_state.layer_skeleton.clone(),
                 };
@@ -641,6 +649,9 @@ impl CollabBridge {
             if artboards_changed {
                 tab_state.last_artboards = st.doc.artboards.clone();
             }
+            if guides_changed {
+                tab_state.last_guides = st.doc.guides.clone();
+            }
         }
 
         let update = txn.encode_update_v1();
@@ -672,6 +683,7 @@ impl CollabBridge {
         let mut remote_tabs = Vec::new();
         let mut tabs_with_z_order_change = HashSet::new();
         let mut tabs_with_artboard_change = HashSet::new();
+        let mut tabs_with_guide_change = HashSet::new();
 
         for key in self.tabs.keys(&txn) {
             if let Some(out) = self.tabs.get(&txn, key) {
@@ -684,6 +696,9 @@ impl CollabBridge {
                             }
                             if prev_tab.is_none_or(|p| p.artboards != tab.artboards) {
                                 tabs_with_artboard_change.insert(tab.id.clone());
+                            }
+                            if prev_tab.is_none_or(|p| p.guides != tab.guides) {
+                                tabs_with_guide_change.insert(tab.id.clone());
                             }
                             self.known_tab_json.insert(key.to_string(), json_str);
                             self.known_tabs.insert(key.to_string(), tab.clone());
@@ -824,6 +839,7 @@ impl CollabBridge {
                             if !remote_tab.artboards.is_empty() {
                                 doc.artboards = remote_tab.artboards.clone();
                             }
+                            doc.guides = remote_tab.guides.clone();
                             if let Some(first_ab) = doc.artboards.first_mut() {
                                 first_ab.name = remote_tab.title.clone();
                             }
@@ -838,6 +854,7 @@ impl CollabBridge {
                         if !remote_tab.artboards.is_empty() {
                             new_doc.artboards = remote_tab.artboards.clone();
                         }
+                        new_doc.guides = remote_tab.guides.clone();
                         if let Some(first_ab) = new_doc.artboards.first_mut() {
                             first_ab.name = remote_tab.title.clone();
                         }
@@ -896,8 +913,9 @@ impl CollabBridge {
             let removed_nodes = removed_by_tab.remove(&tab_id).unwrap_or_default();
             let z_order_changed = tabs_with_z_order_change.contains(&tab_id) || newly_bound_tabs.contains(&tab_id);
             let artboards_changed = tabs_with_artboard_change.contains(&tab_id) || newly_bound_tabs.contains(&tab_id);
+            let guides_changed = tabs_with_guide_change.contains(&tab_id) || newly_bound_tabs.contains(&tab_id);
 
-            if dirty_shapes.is_empty() && removed_nodes.is_empty() && !z_order_changed && !artboards_changed {
+            if dirty_shapes.is_empty() && removed_nodes.is_empty() && !z_order_changed && !artboards_changed && !guides_changed {
                 continue;
             }
 
@@ -1056,10 +1074,13 @@ impl CollabBridge {
                 }
             }
 
-            // 4e. Artboards update from tab if present
+            // 4e. Artboards and Guides update from tab if present
             if let Some(rt) = remote_tab {
                 if !rt.artboards.is_empty() && doc.artboards != rt.artboards {
                     doc.artboards = rt.artboards.clone();
+                }
+                if doc.guides != rt.guides {
+                    doc.guides = rt.guides.clone();
                 }
             }
 

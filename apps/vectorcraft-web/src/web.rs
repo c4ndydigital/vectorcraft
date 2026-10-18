@@ -168,6 +168,7 @@ pub fn start() {
             ws: Rc::new(RefCell::new(None)),
         };
         track_paste(&host.pasted);
+        intercept_browser_shortcuts();
         run(host, canvas, None).await;
     });
 }
@@ -437,6 +438,56 @@ fn track_paste(pasted: &Rc<RefCell<Pasted>>) {
     }
     // The listener lives as long as the page.
     on_paste.forget();
+}
+
+/// Intercept browser shortcuts (such as Ctrl+R / Cmd+R for Show Rulers, Ctrl+S / Cmd+S for Save,
+/// Ctrl+Z / Cmd+Z for Undo, Ctrl+Shift+Z, Ctrl+D, Ctrl+G, etc.) so the Illustrator shortcuts work
+/// directly inside the canvas instead of triggering browser actions like page reload.
+fn intercept_browser_shortcuts() {
+    let Some(window) = web_sys::window() else { return };
+    let on_keydown = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+        let key = e.key();
+        let ctrl_or_cmd = e.ctrl_key() || e.meta_key();
+
+        if ctrl_or_cmd {
+            let key_lower = key.to_ascii_lowercase();
+            // Shortcuts used by Illustrator / VectorCraft that browsers normally capture:
+            // - 'r': Show/Hide Rulers (browser: reload)
+            // - 's': Save (browser: save page)
+            // - 'z': Undo / Redo (browser: history/undo)
+            // - 'y': Redo / Outline view (browser: history)
+            // - 'd': Draw mode / Default colors (browser: bookmark)
+            // - 'g': Group (browser: find again)
+            // - 'e': Export (browser: search engine)
+            // - 'o': Open (browser: open file)
+            // - 'p': Print (handled by VectorCraft or print dialog)
+            // - '0', '1', '+', '-': Zoom controls (browser: page zoom)
+            let should_prevent = matches!(
+                key_lower.as_str(),
+                "r" | "s" | "z" | "y" | "d" | "g" | "e" | "o" | "0" | "1" | "+" | "-" | "="
+            );
+
+            if should_prevent {
+                // Only prevent default if target is not a standard HTML input/textarea
+                let is_input = e.target()
+                    .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+                    .map_or(false, |el| {
+                        let tag = el.tag_name().to_ascii_lowercase();
+                        tag == "input" || tag == "textarea"
+                    });
+
+                if !is_input {
+                    e.prevent_default();
+                }
+            }
+        }
+    });
+
+    // Capture in capturing phase so it executes before browser default handlers
+    if let Err(e) = window.add_event_listener_with_callback_and_bool("keydown", on_keydown.as_ref().unchecked_ref(), true) {
+        log::error!("couldn't attach keydown shortcut interceptor: {e:?}");
+    }
+    on_keydown.forget();
 }
 
 /// Report the loss of `canvas`'s WebGL context to `loss` (WebGPU devices report theirs through

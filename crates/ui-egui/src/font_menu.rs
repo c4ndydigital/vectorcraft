@@ -87,40 +87,12 @@ const FALLBACK_SAMPLE: &str = "Sample";
 /// The script filter's choices: all, Japanese, Latin, Thai.
 const SCRIPTS: usize = 4;
 
-/// Popular Google Fonts available on-demand from the server proxy.
-pub const POPULAR_GOOGLE_FONTS: &[&str] = &[
-    "Roboto",
-    "Roboto Slab",
-    "Roboto Condensed",
-    "Roboto Mono",
-    "Montserrat",
-    "Poppins",
-    "Open Sans",
-    "Lato",
-    "Inter",
-    "Oswald",
-    "Raleway",
-    "Playfair Display",
-    "Merriweather",
-    "Nunito",
-    "Nunito Sans",
-    "Rubik",
-    "Ubuntu",
-    "Lora",
-    "PT Sans",
-    "PT Serif",
-    "Work Sans",
-    "Fira Sans",
-    "Fira Code",
-    "Barlow",
-    "Inconsolata",
-    "Quicksand",
-    "Bebas Neue",
-    "Cinzel",
-    "Cabin",
-    "Source Code Pro",
-    "Zilla Slab",
-];
+/// Full official Google Fonts catalog (1941 families) embedded at compile time for autocomplete and on-demand proxy fetching.
+static GOOGLE_FONTS_CATALOG: &str = include_str!("google_fonts_catalog.txt");
+
+pub fn all_google_fonts() -> impl Iterator<Item = &'static str> {
+    GOOGLE_FONTS_CATALOG.lines().map(str::trim).filter(|s| !s.is_empty())
+}
 
 fn script_label(i: usize) -> &'static str {
     match i {
@@ -344,19 +316,17 @@ fn list(ui: &mut Ui, state_id: egui::Id, st: &mut MenuState, current: &str, samp
                 }
             }
         }
-        // In web / on-demand environments, also include popular Google Fonts that are not yet loaded
-        for &gf in POPULAR_GOOGLE_FONTS {
+        // Include Google Fonts from the full official catalog matching the search/filter
+        for gf in all_google_fonts() {
             if !seen_families.contains(&gf.to_lowercase()) && wanted(gf) {
                 rows.push(Row::Family(gf.to_string()));
             }
         }
-        // If the user typed a specific search query (e.g. "Roboto Slab", "Lora", etc.)
-        // and no existing family exactly matches, offer it as an on-demand font candidate
+        // Fallback for custom query that might not even be in the catalog
         let trimmed_q = query.trim();
         if !trimmed_q.is_empty() && !seen_families.contains(&trimmed_q.to_lowercase()) {
             let already_in_rows = rows.iter().any(|r| r.family().eq_ignore_ascii_case(trimmed_q));
             if !already_in_rows {
-                // Capitalize words nicely for the font row display
                 let formatted_name: String = trimmed_q
                     .split_whitespace()
                     .map(|w| {

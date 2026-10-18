@@ -303,6 +303,9 @@ And [**ArtCraft**](https://getartcraft.com/) itself, our AI image and video stud
 VectorCraft is developed openly on GitHub. Report issues, submit pull requests, or discuss feature ideas at:
 [https://github.com/c4ndydigital/vectorcraft](https://github.com/c4ndydigital/vectorcraft)
 
+For architecture details, collaboration engine specifics, and instructions on synchronizing with upstream releases, see the **[Fork Architecture & Upstream Merge Guide](docs/FORK_MERGE_GUIDE.md)**.
+
+
 ## Deployment & Production Monitoring (Coolify)
 
 VectorCraft includes a multi-stage Dockerfile and native health checks ready for single-click deployment via [Coolify](https://coolify.io).
